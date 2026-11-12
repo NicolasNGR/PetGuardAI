@@ -1,0 +1,47 @@
+{
+  "project_info": {
+    "project_number": "515979611826",
+    "project_id": "petguard-ai-133cd",
+    "storage_bucket": "petguard-ai-133cd.firebasestorage.app"
+  },
+  "client": [
+    {
+      "client_info": {
+        "mobilesdk_app_id": "1:515979611826:android:819a57e73eb6afc0cb03ab",
+        "android_client_info": {
+          "package_name": "com.petguard.ai"
+        }
+      },
+      "oauth_client": [
+        {
+          "client_id": "515979611826-1guugijsp95gfimka67ca7ebv0kp8uva.apps.googleusercontent.com",
+          "client_type": 1,
+          "android_info": {
+            "package_name": "com.petguard.ai",
+            "certificate_hash": "d5789c14896f1626b441ff4bdb7ce6bab5c7dee0"
+          }
+        },
+        {
+          "client_id": "515979611826-iq0hdef6p37ir9aupkijk8ki174m09vk.apps.googleusercontent.com",
+          "client_type": 3
+        }
+      ],
+      "api_key": [
+        {
+          "current_key": "AIzaSyBjECnmc-Kd6J9254ds8cwbL9eLdbE2uWA"
+        }
+      ],
+      "services": {
+        "appinvite_service": {
+          "other_platform_oauth_client": [
+            {
+              "client_id": "515979611826-iq0hdef6p37ir9aupkijk8ki174m09vk.apps.googleusercontent.com",
+              "client_type": 3
+            }
+          ]
+        }
+      }
+    }
+  ],
+  "configuration_version": "1"
+}

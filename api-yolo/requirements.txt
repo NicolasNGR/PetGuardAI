@@ -1,0 +1,11 @@
+fastapi
+uvicorn
+ultralytics
+opencv-python-headless
+numpy
+python-multipart
+
+zeroconf
+google-auth
+cachecontrol
+requests
