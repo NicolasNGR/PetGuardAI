@@ -49,6 +49,10 @@ fun LoginScreen(vm: PetGuardViewModel) {
     Column(Modifier.fillMaxSize().verticalScroll(rememberScrollState()).padding(horizontal = 30.dp), horizontalAlignment = Alignment.CenterHorizontally) {
         Spacer(Modifier.height(42.dp))
         Image(painterResource(R.drawable.petguard_logo), contentDescription = "Logo PetGuard AI", modifier = Modifier.size(width = 160.dp, height = 128.dp), contentScale = ContentScale.Fit)
+        if (vm.localSessionMode) {
+            Text("Modo local de demonstração: os dados não serão sincronizados.", Modifier.padding(top = 8.dp),
+                color = mutedTextColor, style = MaterialTheme.typography.bodySmall)
+        }
         Spacer(Modifier.height(40.dp))
         Column(Modifier.fillMaxWidth()) {
             if (creatingAccount) {

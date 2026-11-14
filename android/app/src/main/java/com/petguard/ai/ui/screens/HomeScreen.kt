@@ -30,6 +30,20 @@ import com.petguard.ai.ui.viewmodel.PetGuardViewModel
 @Composable
 fun HomeScreen(vm: PetGuardViewModel, onConnectCamera: () -> Unit = { vm.navigate(PetGuardPage.Cameras) }) {
     val signals = petSignalColors()
+    if (vm.pets.isEmpty()) {
+        Column(Modifier.fillMaxSize().verticalScroll(rememberScrollState()).padding(horizontal = 22.dp),
+            horizontalAlignment = Alignment.CenterHorizontally, verticalArrangement = Arrangement.Center) {
+            Icon(Icons.Default.Pets, contentDescription = null, tint = MaterialTheme.colorScheme.primary, modifier = Modifier.size(52.dp))
+            Spacer(Modifier.height(14.dp))
+            Text("Nenhum pet cadastrado", color = MaterialTheme.colorScheme.onSurface, style = MaterialTheme.typography.headlineSmall, textAlign = TextAlign.Center)
+            Text("Cadastre seu primeiro pet para acompanhar a rotina e configurar o monitoramento.",
+                Modifier.padding(top = 8.dp, bottom = 18.dp), color = MaterialTheme.colorScheme.onSurfaceVariant, textAlign = TextAlign.Center)
+            Button(onClick = vm::requestAddPet) { Text("Cadastrar meu primeiro pet") }
+            if (vm.localSessionMode) Text("Modo local: os dados ficam nesta sessão e não são sincronizados.",
+                Modifier.padding(top = 14.dp), color = MaterialTheme.colorScheme.onSurfaceVariant, style = MaterialTheme.typography.bodySmall, textAlign = TextAlign.Center)
+        }
+        return
+    }
     val goalCameraUrl = vm.cameras.lastOrNull { it.connected && it.url.isNotBlank() }?.url
     LaunchedEffect(vm.focusedPet.id, vm.focusedPet.porte, vm.focusedPet.pesoKg, goalCameraUrl) {
         vm.loadDailyGoals(vm.focusedPet, goalCameraUrl)
@@ -64,11 +78,14 @@ fun HomeScreen(vm: PetGuardViewModel, onConnectCamera: () -> Unit = { vm.navigat
             }
             if (vm.pets.isNotEmpty()) {
                 Spacer(Modifier.height(10.dp))
-                Row(Modifier.fillMaxWidth().horizontalScroll(rememberScrollState()), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                    vm.pets.forEach { item ->
-                        FilterChip(selected = vm.selectedPetId == item.id, onClick = { vm.selectPet(item.id) },
-                            label = { Text(item.name.replaceFirstChar { it.uppercase() }, maxLines = 1) })
+                Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
+                    Row(Modifier.weight(1f).horizontalScroll(rememberScrollState()), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                        vm.pets.forEach { item ->
+                            FilterChip(selected = vm.selectedPetId == item.id, onClick = { vm.selectPet(item.id) },
+                                label = { Text(item.name.replaceFirstChar { it.uppercase() }, maxLines = 1) })
+                        }
                     }
+                    TextButton(onClick = vm::requestAddPet, contentPadding = PaddingValues(horizontal = 6.dp)) { Text("+ Pet", maxLines = 1) }
                 }
             }
             Spacer(Modifier.height(20.dp))
@@ -84,7 +101,8 @@ fun HomeScreen(vm: PetGuardViewModel, onConnectCamera: () -> Unit = { vm.navigat
                 }
                 vm.latestHomeAlert() != null -> {
                     val alert = vm.latestHomeAlert()!!
-                    PetAlertCard(alert.title, "Alerta da rotina", alert.detail, alert.timeLabel, signals.attention,
+                    val alertColor = if (alert.title == "HIDRATAÇÃO") signals.info else signals.attention
+                    PetAlertCard(alert.title, "Alerta da rotina", alert.detail, alert.timeLabel, alertColor,
                         actionLabel = "Ciente", onAction = { vm.dismissHomeAlert(alert.id) })
                 }
                 else -> Card(Modifier.fillMaxWidth(), colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface)) {

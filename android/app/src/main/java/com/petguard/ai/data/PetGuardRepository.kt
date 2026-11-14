@@ -29,18 +29,11 @@ interface PetGuardRepository {
 class PreviewPetGuardRepository : PetGuardRepository {
     private var preferences = PetPreferences()
     private var tutor = TutorProfile("Tutor PetGuard", "")
-    private var pets = listOf(PetProfile("thor", "Thor", "Cachorro", "", ""))
-    private var selectedPetId = "thor"
+    private var pets = emptyList<PetProfile>()
+    private var selectedPetId = ""
     // Endereço local da webcam usada no teste da apresentação. O notebook deve
     // estar na rede Wi-Fi 192.168.15.x e iniciar a API na porta 8001.
-    private var cameras = listOf(
-        CameraDevice(
-            id = "notebook-webcam",
-            name = "Câmera do notebook",
-            url = "http://192.168.15.64:8001/camera",
-            connected = true
-        )
-    )
+    private var cameras = emptyList<CameraDevice>()
 
     private val events = emptyList<PetEvent>()
 

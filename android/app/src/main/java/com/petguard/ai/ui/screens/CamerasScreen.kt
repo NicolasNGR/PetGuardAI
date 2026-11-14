@@ -58,6 +58,10 @@ fun CamerasScreen(vm: PetGuardViewModel) {
             Text("Câmeras", Modifier.weight(1f), color = MaterialTheme.colorScheme.onSurface, fontSize = 20.sp)
             IconButton(onClick = { showCameraSettings = true }) { Icon(Icons.Default.Settings, contentDescription = "Configurações das câmeras", tint = MaterialTheme.colorScheme.onSurface) }
         }
+        if (vm.localSessionMode) {
+            Text("Modo local nesta sessão; dados não sincronizados na nuvem.", Modifier.padding(bottom = 8.dp),
+                color = MaterialTheme.colorScheme.onSurfaceVariant, style = MaterialTheme.typography.bodySmall, maxLines = 2)
+        }
         Card(Modifier.fillMaxWidth().heightIn(min = 220.dp), shape = RoundedCornerShape(16.dp),
             colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface)) {
             if (selectedCamera?.connected == true && selectedCamera.url.isNotBlank() && vm.cameraPrivacyAccepted) {
@@ -137,8 +141,6 @@ fun CamerasScreen(vm: PetGuardViewModel) {
             OutlinedButton(onClick = { showZonesDialog = true; vm.refreshCameraZones() }, modifier = Modifier.fillMaxWidth()) {
                 Text("Configurar zonas dos potes", maxLines = 1)
             }
-            Text("O sistema registra presença na área dos potes; isso não confirma ingestão.",
-                Modifier.padding(top = 5.dp), color = MaterialTheme.colorScheme.onSurface.copy(alpha = .7f), fontSize = 11.sp)
         }
         if (vm.contentError != null) {
             Spacer(Modifier.height(12.dp))
@@ -146,8 +148,8 @@ fun CamerasScreen(vm: PetGuardViewModel) {
             TextButton(onClick = vm::loadContent) { Text("Tentar novamente") }
         }
         Spacer(Modifier.height(20.dp))
-        Text("Quando houver apenas um pet cadastrado de cada espécie, a detecção será associada automaticamente. Se houver mais de um da mesma espécie, escolha o pet no cartão.",
-            color = MaterialTheme.colorScheme.onSurface.copy(alpha = .8f), fontSize = 12.sp)
+        Text("A associação automática exige um único pet por espécie. Presença no pote não confirma ingestão.",
+            color = MaterialTheme.colorScheme.onSurface.copy(alpha = .8f), fontSize = 12.sp, maxLines = 2)
         Spacer(Modifier.height(20.dp))
     }
 

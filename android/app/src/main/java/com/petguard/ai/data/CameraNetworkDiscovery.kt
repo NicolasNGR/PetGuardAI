@@ -65,7 +65,8 @@ object CameraNetworkDiscovery {
             if (connection.responseCode !in 200..299) return null
             val body = connection.inputStream.bufferedReader().use { it.readText() }
             val health = JSONObject(body)
-            if (health.optString("status") != "online" || health.optString("model").isBlank()) return null
+            // /health intentionally exposes status, YOLO state and camera state, not model metadata.
+            if (health.optString("status") != "online") return null
             val cameraUrl = Uri.Builder().scheme("http").encodedAuthority("$host:8001").path("/camera").build().toString()
             DiscoveredPetGuardCamera("Notebook PetGuard", cameraUrl)
         } catch (_: Exception) {

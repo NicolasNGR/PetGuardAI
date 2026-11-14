@@ -43,8 +43,11 @@ sealed interface AuthUiState {
 }
 
 class PetGuardViewModel(
-    private val repository: PetGuardRepository = FirebaseAuthPetGuardRepository()
+    private val repository: PetGuardRepository = if (com.petguard.ai.BuildConfig.DEBUG && com.petguard.ai.BuildConfig.SUPABASE_PUBLISHABLE_KEY.isBlank())
+        com.petguard.ai.data.PreviewPetGuardRepository() else FirebaseAuthPetGuardRepository()
 ) : ViewModel() {
+    val localSessionMode: Boolean = com.petguard.ai.BuildConfig.DEBUG && com.petguard.ai.BuildConfig.SUPABASE_PUBLISHABLE_KEY.isBlank()
+    var addPetDialogRequested by mutableStateOf(false); private set
     var email by mutableStateOf(""); private set
     var password by mutableStateOf(""); private set
     var passwordConfirmation by mutableStateOf(""); private set
@@ -435,6 +438,13 @@ class PetGuardViewModel(
         if (destination == PetGuardPage.Timeline) selectedDate = LocalDate.now().toString()
         page = destination; actionMessage = null
     }
+
+    fun requestAddPet() {
+        addPetDialogRequested = true
+        navigate(PetGuardPage.Profile)
+    }
+
+    fun consumeAddPetDialogRequest() { addPetDialogRequested = false }
     fun signOut() {
         page = null
         cameraPrivacyAccepted = false

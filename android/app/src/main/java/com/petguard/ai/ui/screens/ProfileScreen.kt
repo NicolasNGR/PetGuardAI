@@ -47,9 +47,17 @@ fun ProfileScreen(vm: PetGuardViewModel) {
         if (!granted) vm.showMessage("Notificações não autorizadas. Você pode ativá-las nas configurações do Android.")
     }
     var showPetManager by remember { mutableStateOf(false) }
+    var startAddingPet by remember { mutableStateOf(false) }
     var editPet by remember { mutableStateOf(false) }
     var editTutor by remember { mutableStateOf(false) }
     var confirmResetDemo by remember { mutableStateOf(false) }
+    LaunchedEffect(vm.addPetDialogRequested) {
+        if (vm.addPetDialogRequested) {
+            showPetManager = true
+            startAddingPet = true
+            vm.consumeAddPetDialogRequest()
+        }
+    }
     Column(Modifier.fillMaxSize().verticalScroll(rememberScrollState()).padding(horizontal = 22.dp)) {
         if (vm.isLoading) { Spacer(Modifier.height(8.dp)); LinearProgressIndicator(Modifier.fillMaxWidth()) }
         vm.contentError?.let { message ->
@@ -122,7 +130,8 @@ fun ProfileScreen(vm: PetGuardViewModel) {
     if (showPetManager) PetsDialog(
         pets = vm.pets,
         selectedId = vm.selectedPetId,
-        onDismiss = { showPetManager = false },
+        startAdding = startAddingPet,
+        onDismiss = { showPetManager = false; startAddingPet = false },
         onSelect = vm::selectPet,
         onEditSelected = { showPetManager = false; editPet = true },
         onAddPet = { name, species, size, weight -> vm.addPet(name, species, size, weight) }
@@ -158,12 +167,13 @@ private fun ProfileActionRow(
 private fun PetsDialog(
     pets: List<PetProfile>,
     selectedId: String,
+    startAdding: Boolean,
     onDismiss: () -> Unit,
     onSelect: (String) -> Unit,
     onEditSelected: () -> Unit,
     onAddPet: (String, String, String, Double?) -> Unit
 ) {
-    var adding by remember { mutableStateOf(false) }
+    var adding by remember(startAdding) { mutableStateOf(startAdding) }
     var name by remember { mutableStateOf("") }
     var species by remember { mutableStateOf("Cachorro") }
     var porte by remember { mutableStateOf("medio") }
