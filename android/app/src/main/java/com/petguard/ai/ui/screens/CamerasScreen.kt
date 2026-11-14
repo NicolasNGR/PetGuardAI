@@ -23,10 +23,13 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.asImageBitmap
+import androidx.compose.foundation.Image
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.compose.ui.viewinterop.AndroidView
 import android.graphics.Bitmap
+import android.graphics.BitmapFactory
 import android.content.Context
 import android.net.nsd.NsdManager
 import android.net.nsd.NsdServiceInfo
@@ -123,7 +126,7 @@ fun CamerasScreen(vm: PetGuardViewModel) {
                 vm.liveDetections.forEach { detection ->
                     val speciesName = if (detection.species == "dog") "cachorro" else "gato"
                     val compatiblePets = vm.pets.filter { it.species.equals(speciesName, ignoreCase = true) }
-                    DetectionAssignmentCard(detection, compatiblePets.map { it.id to it.name }, speciesName, vm::assignDetectionToPet)
+                    DetectionAssignmentCard(detection, compatiblePets.map { it.id to it.name.replaceFirstChar { c -> c.uppercase() } }, speciesName, vm::assignDetectionToPet)
                 }
                 if (vm.pets.isEmpty()) {
                     Text("Cadastre seu cachorro ou gato na aba Perfil para associar esta detecção.",
@@ -132,9 +135,9 @@ fun CamerasScreen(vm: PetGuardViewModel) {
             }
             Spacer(Modifier.height(10.dp))
             OutlinedButton(onClick = { showZonesDialog = true; vm.refreshCameraZones() }, modifier = Modifier.fillMaxWidth()) {
-                Text("Configurar zonas de água e ração")
+                Text("Configurar zonas dos potes", maxLines = 1)
             }
-            Text("Desenhe cada zona sobre a imagem. O sistema registra a presença do pet na área; isso não confirma que ele bebeu ou comeu.",
+            Text("O sistema registra presença na área dos potes; isso não confirma ingestão.",
                 Modifier.padding(top = 5.dp), color = MaterialTheme.colorScheme.onSurface.copy(alpha = .7f), fontSize = 11.sp)
         }
         if (vm.contentError != null) {
@@ -171,6 +174,7 @@ fun CamerasScreen(vm: PetGuardViewModel) {
     if (showZonesDialog && selectedCamera != null) CameraZonesDialog(
         cameraUrl = vm.cameraStreamUrl ?: selectedCamera.url,
         zones = vm.cameraZones,
+        snapshot = vm.cameraSnapshot,
         loading = vm.zonesLoading,
         saving = vm.zonesSaving,
         onDismiss = { showZonesDialog = false },
@@ -212,6 +216,7 @@ private fun DetectionAssignmentCard(
 private fun CameraZonesDialog(
     cameraUrl: String,
     zones: Map<String, CameraZone>,
+    snapshot: ByteArray?,
     loading: Boolean,
     saving: Boolean,
     onDismiss: () -> Unit,
@@ -235,7 +240,8 @@ private fun CameraZonesDialog(
                     FilterChip(selected = selectedKind == "comida", onClick = { selectedKind = "comida" }, label = { Text("Ração") })
                 }
                 Box(Modifier.fillMaxWidth().aspectRatio(4f / 3f).background(Color.Black, RoundedCornerShape(12.dp)), contentAlignment = Alignment.Center) {
-                    CameraStreamPreview(cameraUrl, Modifier.fillMaxSize())
+                    val bitmap = remember(snapshot) { snapshot?.let { BitmapFactory.decodeByteArray(it, 0, it.size)?.asImageBitmap() } }
+                    if (bitmap != null) Image(bitmap, contentDescription = "Imagem atual da câmera", modifier = Modifier.fillMaxSize())
                     Canvas(Modifier.fillMaxSize().pointerInput(selectedKind, editedZones) {
                         detectDragGestures(
                             onDragStart = { position ->
@@ -451,8 +457,7 @@ private fun CameraSettingsDialog(
                                 Text(camera.name, color = MaterialTheme.colorScheme.onSurfaceVariant, style = MaterialTheme.typography.titleSmall)
                                 Text(
                                     when {
-                                        camera.connected && camera.id == activeCameraId -> "Conectada e transmitindo"
-                                        camera.connected -> "Aguardando confirmação no app"
+                                        camera.connected -> "Conectada • ${camera.url}"
                                         else -> "Salva · desconectada"
                                     },
                                     color = MaterialTheme.colorScheme.onSurfaceVariant,

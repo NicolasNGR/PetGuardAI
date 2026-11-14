@@ -5,7 +5,9 @@ data class PetProfile(
     val name: String,
     val species: String,
     val breed: String,
-    val ageLabel: String
+    val ageLabel: String,
+    val porte: String = "medio",
+    val pesoKg: Double? = null
 )
 
 data class TutorProfile(val name: String, val email: String)
@@ -27,7 +29,12 @@ data class CameraAlert(
     val priority: String,
     val message: String,
     val petId: String = "",
-    val petName: String = ""
+    val petName: String = "",
+    val activity: String = "",
+    val nivelAtividade: String = "",
+    val displacementPixels: Double = 0.0,
+    val petSize: String = "",
+    val yoloEnabled: Boolean = true
 )
 
 data class LivePetDetection(
@@ -36,12 +43,33 @@ data class LivePetDetection(
     val confidence: Float,
     val interaction: String?,
     val petId: String,
-    val petName: String
+    val petName: String,
+    val activity: String = "",
+    val nivelAtividade: String = "",
+    val displacementPixels: Double = 0.0,
+    val petSize: String = "",
+    val yoloEnabled: Boolean = true
+)
+
+data class PetDailyGoals(
+    val petId: String,
+    val referenceWeightKg: Double,
+    val hydrationMlDaily: Int,
+    val caloriesKcalDaily: Int,
+    val foodGramsDaily: Int
+)
+
+data class HomeAlert(
+    val id: String,
+    val title: String,
+    val detail: String,
+    val timeLabel: String,
+    val sortKey: String
 )
 
 data class CameraZone(val x1: Float, val y1: Float, val x2: Float, val y2: Float)
 
-enum class EventCategory { ATTENTION, INJURY, HEALTHY, ACTIVITY }
+enum class EventCategory { ATTENTION, INJURY, HEALTHY, ACTIVITY, HIDRATACAO, ALIMENTACAO, PRESENCA }
 
 data class CameraDevice(
     val id: String,

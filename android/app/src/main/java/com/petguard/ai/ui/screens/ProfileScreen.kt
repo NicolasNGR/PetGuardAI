@@ -49,6 +49,7 @@ fun ProfileScreen(vm: PetGuardViewModel) {
     var showPetManager by remember { mutableStateOf(false) }
     var editPet by remember { mutableStateOf(false) }
     var editTutor by remember { mutableStateOf(false) }
+    var confirmResetDemo by remember { mutableStateOf(false) }
     Column(Modifier.fillMaxSize().verticalScroll(rememberScrollState()).padding(horizontal = 22.dp)) {
         if (vm.isLoading) { Spacer(Modifier.height(8.dp)); LinearProgressIndicator(Modifier.fillMaxWidth()) }
         vm.contentError?.let { message ->
@@ -101,11 +102,14 @@ fun ProfileScreen(vm: PetGuardViewModel) {
         Surface(color = MaterialTheme.colorScheme.surface, shape = RoundedCornerShape(12.dp)) {
             Column {
                 ProfileActionRow(Icons.Default.Pets, "Meus Pets", Icons.Default.Add,
-                    onClick = { showPetManager = true }, subtitle = if (vm.pets.isEmpty()) "Adicione seu primeiro pet" else "${vm.pet.name} · ${vm.pet.species} · ${vm.pets.size} pet(s)")
+                    onClick = { showPetManager = true }, subtitle = if (vm.pets.isEmpty()) "Adicione seu primeiro pet" else "${vm.pet.name.replaceFirstChar { it.uppercase() }} · ${vm.pet.species} · ${vm.pets.size} pet(s)")
                 HorizontalDivider(color = MaterialTheme.colorScheme.background)
                 ProfileActionRow(Icons.Default.CameraAlt, "Dispositivos Conectados", Icons.Default.Add,
                     onClick = { vm.navigate(PetGuardPage.Cameras) }, subtitle = "${vm.cameras.size} dispositivo(s)")
             }
+        }
+        TextButton(onClick = { confirmResetDemo = true }, modifier = Modifier.align(Alignment.CenterHorizontally)) {
+            Text("Limpar histórico de testes", color = MaterialTheme.colorScheme.onSurfaceVariant, fontSize = 12.sp)
         }
         Spacer(Modifier.height(34.dp)); Text("Conta", color = MaterialTheme.colorScheme.onSurface, fontSize = 13.sp); Spacer(Modifier.height(12.dp))
         Button(onClick = vm::signOut, modifier = Modifier.fillMaxWidth().height(52.dp),
@@ -121,10 +125,14 @@ fun ProfileScreen(vm: PetGuardViewModel) {
         onDismiss = { showPetManager = false },
         onSelect = vm::selectPet,
         onEditSelected = { showPetManager = false; editPet = true },
-        onAddPet = vm::addPet
+        onAddPet = { name, species, size, weight -> vm.addPet(name, species, size, weight) }
     )
-    if (editPet && vm.pets.isNotEmpty()) EditPetDialog(vm.pet, onDismiss = { editPet = false }, onSave = { name, species -> vm.updatePet(name, species); editPet = false })
+    if (editPet && vm.pets.isNotEmpty()) EditPetDialog(vm.pet, onDismiss = { editPet = false }, onSave = { name, species, size, weight -> vm.updatePet(name, species, size, weight); editPet = false })
     if (editTutor) EditTutorNameDialog(vm.tutorName, onDismiss = { editTutor = false }, onSave = { name -> vm.updateTutorName(name); editTutor = false })
+    if (confirmResetDemo) AlertDialog(onDismissRequest = { confirmResetDemo = false }, title = { Text("Limpar histórico de testes?") },
+        text = { Text("Alertas e dados de demonstração da câmera serão removidos.") },
+        confirmButton = { TextButton(onClick = { vm.resetDemoData(); confirmResetDemo = false }) { Text("Limpar") } },
+        dismissButton = { TextButton(onClick = { confirmResetDemo = false }) { Text("Cancelar") } })
 
 }
 
@@ -153,11 +161,13 @@ private fun PetsDialog(
     onDismiss: () -> Unit,
     onSelect: (String) -> Unit,
     onEditSelected: () -> Unit,
-    onAddPet: (String, String) -> Unit
+    onAddPet: (String, String, String, Double?) -> Unit
 ) {
     var adding by remember { mutableStateOf(false) }
     var name by remember { mutableStateOf("") }
     var species by remember { mutableStateOf("Cachorro") }
+    var porte by remember { mutableStateOf("medio") }
+    var peso by remember { mutableStateOf("") }
     AlertDialog(onDismissRequest = onDismiss,
         title = {
             Row(verticalAlignment = Alignment.CenterVertically) {
@@ -175,7 +185,7 @@ private fun PetsDialog(
                             Row(Modifier.padding(horizontal = 10.dp, vertical = 6.dp), verticalAlignment = Alignment.CenterVertically) {
                                 Icon(if (pet.species == "Gato") Icons.Default.Pets else Icons.Default.Pets, null, tint = MaterialTheme.colorScheme.primary)
                                 Column(Modifier.weight(1f).padding(start = 12.dp)) {
-                                    Text(pet.name, color = MaterialTheme.colorScheme.onSurface)
+                                    Text(pet.name.replaceFirstChar { it.uppercase() }, color = MaterialTheme.colorScheme.onSurface)
                                     Text(pet.species, color = MaterialTheme.colorScheme.onSurface.copy(alpha = .7f), style = MaterialTheme.typography.bodySmall)
                                 }
                                 RadioButton(selected = pet.id == selectedId, onClick = null)
@@ -189,14 +199,23 @@ private fun PetsDialog(
                         FilterChip(selected = species == "Cachorro", onClick = { species = "Cachorro" }, label = { Text("Cachorro") })
                         FilterChip(selected = species == "Gato", onClick = { species = "Gato" }, label = { Text("Gato") })
                     }
+                    Text("Porte", style = MaterialTheme.typography.labelLarge)
+                    Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                        listOf("pequeno" to "Pequeno", "medio" to "Médio", "grande" to "Grande").forEach { (value, label) ->
+                            FilterChip(selected = porte == value, onClick = { porte = value }, label = { Text(label) })
+                        }
+                    }
+                    val pesoError = weightInputError(peso)
+                    OutlinedTextField(value = peso, onValueChange = { input -> peso = input.filter { it.isDigit() || it == ',' || it == '.' }.take(6) }, label = { Text("Peso (kg), opcional") }, singleLine = true,
+                        isError = pesoError != null, supportingText = { pesoError?.let { Text(it) } })
                 }
             }
         },
         confirmButton = {
             Row(horizontalArrangement = Arrangement.spacedBy(4.dp)) {
                 if (!adding && pets.isNotEmpty()) TextButton(onClick = onEditSelected) { Text("Editar selecionado") }
-                Button(enabled = !adding || name.trim().length >= 2, onClick = {
-                    if (adding) { onAddPet(name, species); onDismiss() } else onDismiss()
+                Button(enabled = !adding || (name.trim().length >= 2 && weightInputError(peso) == null), onClick = {
+                    if (adding) { onAddPet(name, species, porte, peso.replace(',', '.').toDoubleOrNull()); onDismiss() } else onDismiss()
                 }) { Text(if (adding) "Adicionar" else "Concluir") }
             }
         },
@@ -207,11 +226,13 @@ private fun PetsDialog(
 }
 
 @Composable
-private fun EditPetDialog(pet: PetProfile, onDismiss: () -> Unit, onSave: (String, String) -> Unit) {
+private fun EditPetDialog(pet: PetProfile, onDismiss: () -> Unit, onSave: (String, String, String, Double?) -> Unit) {
     var name by remember(pet.id, pet.name) { mutableStateOf(pet.name) }
     var species by remember(pet.id, pet.species) { mutableStateOf(pet.species) }
+    var porte by remember(pet.id, pet.porte) { mutableStateOf(pet.porte) }
+    var peso by remember(pet.id, pet.pesoKg) { mutableStateOf(pet.pesoKg?.toString().orEmpty()) }
     AlertDialog(onDismissRequest = onDismiss,
-        title = { Text("Editar ${pet.name}") },
+        title = { Text("Editar ${pet.name.replaceFirstChar { it.uppercase() }}") },
         text = {
             Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
                 OutlinedTextField(value = name, onValueChange = { name = it.take(40) }, label = { Text("Nome") }, singleLine = true)
@@ -220,10 +241,29 @@ private fun EditPetDialog(pet: PetProfile, onDismiss: () -> Unit, onSave: (Strin
                     FilterChip(selected = species == "Cachorro", onClick = { species = "Cachorro" }, label = { Text("Cachorro") })
                     FilterChip(selected = species == "Gato", onClick = { species = "Gato" }, label = { Text("Gato") })
                 }
+                Text("Porte", style = MaterialTheme.typography.labelLarge)
+                Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                    listOf("pequeno" to "Pequeno", "medio" to "Médio", "grande" to "Grande").forEach { (value, label) ->
+                        FilterChip(selected = porte == value, onClick = { porte = value }, label = { Text(label) })
+                    }
+                }
+                val pesoError = weightInputError(peso)
+                OutlinedTextField(value = peso, onValueChange = { input -> peso = input.filter { it.isDigit() || it == ',' || it == '.' }.take(6) }, label = { Text("Peso (kg), opcional") }, singleLine = true,
+                    isError = pesoError != null, supportingText = { pesoError?.let { Text(it) } })
             }
         },
-        confirmButton = { TextButton(enabled = name.trim().length >= 2, onClick = { onSave(name, species) }) { Text("Salvar") } },
+        confirmButton = { TextButton(enabled = name.trim().length >= 2 && weightInputError(peso) == null, onClick = { onSave(name, species, porte, peso.replace(',', '.').toDoubleOrNull()) }) { Text("Salvar") } },
         dismissButton = { TextButton(onClick = onDismiss) { Text("Cancelar") } })
+}
+
+private fun weightInputError(value: String): String? {
+    if (value.isBlank()) return null
+    val weight = value.replace(',', '.').toDoubleOrNull() ?: return "Informe um peso válido em kg."
+    return when {
+        weight <= 0.0 -> "O peso deve ser maior que 0 kg."
+        weight > 200.0 -> "O peso máximo é 200 kg."
+        else -> null
+    }
 }
 
 @Composable

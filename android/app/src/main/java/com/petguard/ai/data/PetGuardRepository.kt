@@ -13,6 +13,7 @@ interface PetGuardRepository {
     suspend fun signOut(): RepositoryResult<Unit>
     suspend fun loadContent(): RepositoryResult<PetGuardContent>
     suspend fun addEvent(event: PetEvent): RepositoryResult<Unit>
+    suspend fun clearApiEvents(): RepositoryResult<Unit>
     suspend fun savePreferences(preferences: PetPreferences): RepositoryResult<Unit>
     suspend fun addCamera(name: String, url: String): RepositoryResult<List<CameraDevice>>
     suspend fun setCameraConnected(id: String, connected: Boolean): RepositoryResult<List<CameraDevice>>
@@ -51,6 +52,7 @@ class PreviewPetGuardRepository : PetGuardRepository {
     override suspend fun signOut() = RepositoryResult.Success(Unit)
     override suspend fun loadContent() = RepositoryResult.Success(PetGuardContent(tutor, pets, selectedPetId, cameras, events, preferences))
     override suspend fun addEvent(event: PetEvent): RepositoryResult<Unit> = RepositoryResult.Success(Unit)
+    override suspend fun clearApiEvents(): RepositoryResult<Unit> = RepositoryResult.Success(Unit)
     override suspend fun savePreferences(preferences: PetPreferences): RepositoryResult<Unit> {
         this.preferences = preferences
         return RepositoryResult.Success(Unit)

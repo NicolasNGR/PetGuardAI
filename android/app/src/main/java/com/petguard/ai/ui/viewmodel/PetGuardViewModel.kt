@@ -12,9 +12,11 @@ import com.petguard.ai.data.CameraAlert
 import com.petguard.ai.data.CameraZone
 import com.petguard.ai.data.LivePetDetection
 import com.petguard.ai.data.EventCategory
+import com.petguard.ai.data.HomeAlert
 import com.petguard.ai.data.FirebaseAuthPetGuardRepository
 import com.petguard.ai.data.PetGuardAlertsApi
 import com.petguard.ai.data.PetEvent
+import com.petguard.ai.data.PetDailyGoals
 import com.petguard.ai.data.PetGuardContent
 import com.petguard.ai.data.PetGuardRepository
 import com.petguard.ai.data.PetPreferences
@@ -27,7 +29,9 @@ import kotlinx.coroutines.delay
 import kotlinx.coroutines.isActive
 import java.time.Instant
 import java.time.LocalDate
-import java.time.ZoneOffset
+import java.time.ZoneId
+import kotlin.math.pow
+import kotlin.math.roundToInt
 
 enum class PetGuardPage { Home, Cameras, Timeline, Profile }
 
@@ -59,6 +63,7 @@ class PetGuardViewModel(
     val pet: PetProfile get() = pets.firstOrNull { it.id == selectedPetId }
         ?: pets.firstOrNull()
         ?: PetProfile("", "seu pet", "", "", "")
+    val focusedPet: PetProfile get() = pet
     var events by mutableStateOf<List<PetEvent>>(emptyList()); private set
     var cameras by mutableStateOf<List<CameraDevice>>(emptyList()); private set
     var isLoading by mutableStateOf(false); private set
@@ -72,9 +77,16 @@ class PetGuardViewModel(
         private set
     var pendingAlertNotifications by mutableStateOf<List<CameraAlert>>(emptyList())
         private set
+    var cameraAlerts by mutableStateOf<List<CameraAlert>>(emptyList())
+        private set
+    private var dismissedHomeAlertIds by mutableStateOf<Set<String>>(emptySet())
     var liveDetections by mutableStateOf<List<LivePetDetection>>(emptyList())
         private set
     var cameraZones by mutableStateOf<Map<String, CameraZone>>(emptyMap())
+        private set
+    var cameraSnapshot by mutableStateOf<ByteArray?>(null)
+        private set
+    var dailyGoals by mutableStateOf<PetDailyGoals?>(null)
         private set
     var zonesLoading by mutableStateOf(false)
         private set
@@ -246,6 +258,7 @@ class PetGuardViewModel(
                     liveDetections = detections
                     autoAssignUnambiguousDetections(camera, detections)
                     if (incoming.isNotEmpty()) {
+                        cameraAlerts = (cameraAlerts + incoming).distinctBy(CameraAlert::id).takeLast(300)
                         val activityEvents = incoming.map { alert ->
                             val datePart = alert.timestamp.substringBefore('T').substringBefore(' ')
                             val timePart = alert.timestamp.substringAfter('T').takeIf { it != alert.timestamp }
@@ -254,10 +267,17 @@ class PetGuardViewModel(
                                 id = "api-alert-${alert.id}",
                                 date = datePart,
                                 category = when (alert.category.uppercase()) {
-                                    "HIDRATACAO", "ALIMENTACAO" -> if (alert.priority.equals("atencao", ignoreCase = true)) EventCategory.ATTENTION else EventCategory.ACTIVITY
+                                    "HIDRATACAO" -> EventCategory.HIDRATACAO
+                                    "ALIMENTACAO" -> EventCategory.ALIMENTACAO
+                                    "PRESENCA" -> EventCategory.PRESENCA
                                     else -> EventCategory.ACTIVITY
                                 },
-                                title = alert.petName.takeIf { it.isNotBlank() }?.let { "Alerta · $it" } ?: "Alerta da câmera",
+                                title = when (alert.category.uppercase()) {
+                                    "HIDRATACAO" -> "Hidratação • ${alert.petName.ifBlank { "pet" }.replaceFirstChar { it.uppercase() }}"
+                                    "ALIMENTACAO" -> "Alimentação • ${alert.petName.ifBlank { "pet" }.replaceFirstChar { it.uppercase() }}"
+                                    "PRESENCA" -> "Presença • ${alert.petName.ifBlank { "pet" }.replaceFirstChar { it.uppercase() }}"
+                                    else -> alert.petName.takeIf { it.isNotBlank() }?.replaceFirstChar { it.uppercase() }?.let { "Alerta · $it" } ?: "Alerta da câmera"
+                                },
                                 detail = alert.message,
                                 timeLabel = timePart.ifBlank { "agora" },
                                 petId = alert.petId
@@ -307,6 +327,7 @@ class PetGuardViewModel(
         viewModelScope.launch {
             zonesLoading = true
             try {
+                cameraSnapshot = PetGuardAlertsApi.fetchCameraSnapshot(camera.url)
                 cameraZones = PetGuardAlertsApi.fetchZones(camera.url)
                 actionMessage = null
             } catch (cancelled: CancellationException) {
@@ -410,11 +431,16 @@ class PetGuardViewModel(
 
 
 
-    fun navigate(destination: PetGuardPage) { page = destination; actionMessage = null }
+    fun navigate(destination: PetGuardPage) {
+        if (destination == PetGuardPage.Timeline) selectedDate = LocalDate.now().toString()
+        page = destination; actionMessage = null
+    }
     fun signOut() {
         page = null
         cameraPrivacyAccepted = false
         cameraStreamUrl = null
+        cameraAlerts = emptyList()
+        dismissedHomeAlertIds = emptySet()
         sharedSyncJob?.cancel()
         sharedSyncJob = null
         password = ""
@@ -430,7 +456,16 @@ class PetGuardViewModel(
     }
     fun onLightThemeChange(value: Boolean) = savePreferences(lightTheme = value)
     fun onHighContrastChange(value: Boolean) = savePreferences(highContrast = value)
-    fun setYolo(value: Boolean) = savePreferences(yoloEnabled = value)
+    fun setYolo(value: Boolean) {
+        savePreferences(yoloEnabled = value)
+        cameras.filter { it.connected && it.url.isNotBlank() }.forEach { camera ->
+            viewModelScope.launch {
+                try { PetGuardAlertsApi.setYoloEnabled(camera.url, value) }
+                catch (cancelled: CancellationException) { throw cancelled }
+                catch (_: Exception) { actionMessage = "Não foi possível atualizar a análise YOLO na câmera." }
+            }
+        }
+    }
     fun setNotifications(value: Boolean) = savePreferences(notificationsEnabled = value)
 
     private fun savePreferences(
@@ -456,10 +491,10 @@ class PetGuardViewModel(
         selectedDate = runCatching { LocalDate.parse(value).toString() }.getOrDefault(selectedDate)
     }
     fun selectDateMillis(value: Long) {
-        selectedDate = Instant.ofEpochMilli(value).atZone(ZoneOffset.UTC).toLocalDate().toString()
+        selectedDate = Instant.ofEpochMilli(value).atZone(ZoneId.systemDefault()).toLocalDate().toString()
     }
     val selectedDateMillis: Long
-        get() = runCatching { LocalDate.parse(selectedDate).atStartOfDay(ZoneOffset.UTC).toInstant().toEpochMilli() }
+        get() = runCatching { LocalDate.parse(selectedDate).atStartOfDay(ZoneId.systemDefault()).toInstant().toEpochMilli() }
             .getOrDefault(Instant.now().toEpochMilli())
     fun eventsForSelectedDay(): List<PetEvent> = events.filter { it.date == selectedDate }
     fun eventsForSelectedPet(): List<PetEvent> = events.filter { it.petId == selectedPetId }
@@ -594,13 +629,16 @@ class PetGuardViewModel(
         }
     }
 
-    fun updatePet(name: String, species: String) {
+    private fun validWeight(weight: Double?): Boolean = weight == null || (weight.isFinite() && weight > 0.0 && weight <= 200.0)
+
+    fun updatePet(name: String, species: String, porte: String = pet.porte, pesoKg: Double? = pet.pesoKg) {
         if (pets.isEmpty()) { actionMessage = "Adicione seu primeiro pet antes de editar."; return }
         val safeName = name.trim().filter { !it.isISOControl() }.take(40)
         if (safeName.length < 2) { actionMessage = "O nome do pet precisa ter pelo menos 2 caracteres."; return }
         if (species !in setOf("Cachorro", "Gato")) { actionMessage = "Escolha cachorro ou gato."; return }
+        if (!validWeight(pesoKg)) { actionMessage = "O peso deve ser maior que 0 kg e menor ou igual a 200 kg."; return }
         viewModelScope.launch {
-            when (val result = safely { repository.updatePet(pet.copy(name = safeName, species = species)) }) {
+            when (val result = safely { repository.updatePet(pet.copy(name = safeName, species = species, porte = porte, pesoKg = pesoKg)) }) {
                 is RepositoryResult.Success -> {
                     pets = pets.map { if (it.id == result.value.id) result.value else it }
                     actionMessage = "Perfil do pet atualizado."
@@ -610,16 +648,24 @@ class PetGuardViewModel(
         }
     }
 
-    fun addPet(name: String, species: String) {
+    fun addPet(name: String, species: String, porte: String = "medio", pesoKg: Double? = null) {
         val safeName = name.trim().filter { !it.isISOControl() }.take(40)
         if (safeName.length < 2) { actionMessage = "O nome do pet precisa ter pelo menos 2 caracteres."; return }
         if (species !in setOf("Cachorro", "Gato")) { actionMessage = "Escolha cachorro ou gato."; return }
+        if (!validWeight(pesoKg)) { actionMessage = "O peso deve ser maior que 0 kg e menor ou igual a 200 kg."; return }
         viewModelScope.launch {
             when (val result = safely { repository.addPet(safeName, species) }) {
                 is RepositoryResult.Success -> {
-                    pets = result.value
+                    val added = result.value.lastOrNull()
+                    var petSaved = true
+                    if (added != null && (porte != "medio" || pesoKg != null)) {
+                        when (val saved = safely { repository.updatePet(added.copy(porte = porte, pesoKg = pesoKg)) }) {
+                            is RepositoryResult.Success -> pets = result.value.map { if (it.id == saved.value.id) saved.value else it }
+                            is RepositoryResult.Failure -> { pets = result.value; actionMessage = saved.message; petSaved = false }
+                        }
+                    } else pets = result.value
                     pets.lastOrNull()?.let { addedPet -> selectedPetId = addedPet.id }
-                    actionMessage = "$safeName foi adicionado ao perfil."
+                    if (petSaved) actionMessage = "$safeName foi adicionado ao perfil."
                 }
                 is RepositoryResult.Failure -> actionMessage = result.message
             }
@@ -627,12 +673,74 @@ class PetGuardViewModel(
     }
 
     fun selectPet(id: String) {
+        if (pets.none { it.id == id }) return
+        selectedPetId = id
         viewModelScope.launch {
             when (val result = safely { repository.selectPet(id) }) {
                 is RepositoryResult.Success -> { selectedPetId = result.value.id; actionMessage = "Pet selecionado: ${result.value.name}." }
                 is RepositoryResult.Failure -> actionMessage = result.message
             }
         }
+    }
+
+    fun focusPet(id: String) = selectPet(id)
+
+    fun resetDemoData() {
+        val camera = cameras.lastOrNull { it.connected && it.url.isNotBlank() } ?: run {
+            actionMessage = "Conecte uma câmera antes de limpar o histórico de testes."; return
+        }
+        viewModelScope.launch {
+            try {
+                PetGuardAlertsApi.resetDemo(camera.url)
+                val clearedEvents = when (val result = safely { repository.clearApiEvents() }) {
+                    is RepositoryResult.Success -> { events = events.filterNot { it.id.startsWith("api-alert-") }; true }
+                    is RepositoryResult.Failure -> { actionMessage = result.message; false }
+                }
+                if (clearedEvents) actionMessage = "Histórico de testes limpo."
+                lastProcessedAlertId = 0L
+                hasLoadedAlertBaseline = false
+            } catch (cancelled: CancellationException) { throw cancelled }
+            catch (_: Exception) { actionMessage = "Não foi possível limpar os dados de teste." }
+        }
+    }
+
+    fun activityForFocusedPet(): String {
+        val detection = liveDetections.firstOrNull { it.petId == selectedPetId && selectedPetId.isNotBlank() }
+            ?: liveDetections.firstOrNull()
+        return detection?.activity?.takeIf(String::isNotBlank) ?: "Aguardando detecção"
+    }
+
+    fun latestFeedingEvent(): PetEvent? = events
+        .filter { it.petId == selectedPetId && it.category == EventCategory.ALIMENTACAO }
+        .maxByOrNull { it.date + it.timeLabel }
+
+    fun loadDailyGoals(pet: PetProfile, cameraUrl: String?) {
+        if (pet.id.isBlank()) { dailyGoals = null; return }
+        dailyGoals = estimateDailyGoals(pet)
+        if (cameraUrl.isNullOrBlank()) return
+        viewModelScope.launch {
+            try {
+                val serverGoals = PetGuardAlertsApi.fetchPetDailyGoals(cameraUrl, pet.id)
+                if (selectedPetId == pet.id) dailyGoals = serverGoals
+            } catch (cancelled: CancellationException) {
+                throw cancelled
+            } catch (_: Exception) {
+                // Keep the same estimate calculated from the user's saved pet profile.
+            }
+        }
+    }
+
+    fun estimateDailyGoals(pet: PetProfile): PetDailyGoals {
+        val defaults = mapOf("pequeno" to 6.0, "medio" to 16.0, "médio" to 16.0, "grande" to 30.0)
+        val referenceWeight = (pet.pesoKg ?: defaults[pet.porte.lowercase()] ?: 16.0).coerceAtLeast(0.1)
+        val calories = (140.0 * referenceWeight.pow(0.75)).roundToInt()
+        return PetDailyGoals(
+            petId = pet.id,
+            referenceWeightKg = referenceWeight,
+            hydrationMlDaily = (referenceWeight * 55).roundToInt(),
+            caloriesKcalDaily = calories,
+            foodGramsDaily = (calories / 3.5).roundToInt()
+        )
     }
 
     fun updateTutorName(name: String) {
@@ -661,6 +769,13 @@ class PetGuardViewModel(
                 PetGuardAlertsApi.setCameraConnected(camera.url, true)
                 cameraStreamUrl = authorizedStreamUrl
                 cameraPrivacyAccepted = true
+                try {
+                    PetGuardAlertsApi.setYoloEnabled(camera.url, yoloEnabled)
+                } catch (cancelled: CancellationException) {
+                    throw cancelled
+                } catch (_: Exception) {
+                    actionMessage = "Câmera conectada; não foi possível sincronizar a análise YOLO."
+                }
                 actionMessage = "Câmera conectada; monitoramento iniciado."
             } catch (cancelled: CancellationException) {
                 throw cancelled
@@ -671,7 +786,31 @@ class PetGuardViewModel(
             }
         }
     }
-    fun latestAttentionEvent(): PetEvent? = events.firstOrNull { it.petId == selectedPetId && it.category == EventCategory.ATTENTION }
+    fun latestHomeAlert(): HomeAlert? {
+        if (selectedPetId.isBlank()) return null
+        val fromEvents = events.asSequence()
+            .filter { it.petId == selectedPetId && it.category in setOf(EventCategory.ATTENTION, EventCategory.HIDRATACAO, EventCategory.ALIMENTACAO) }
+            .map { event ->
+                val label = when (event.category) {
+                    EventCategory.HIDRATACAO -> "HIDRATAÇÃO"
+                    EventCategory.ALIMENTACAO -> "ALIMENTAÇÃO"
+                    else -> "ATENÇÃO NA ROTINA"
+                }
+                HomeAlert(event.id, label, "${event.title}\n${event.detail}", event.timeLabel, "${event.date}T${event.timeLabel}")
+            }
+        val fromCamera = cameraAlerts.asSequence()
+            .filter { it.petId == selectedPetId && (it.category.equals("HIDRATACAO", true) || it.category.equals("ALIMENTACAO", true) || it.category.equals("ATTENTION", true) || it.priority.equals("atencao", true)) }
+            .map { alert ->
+                val category = alert.category.uppercase()
+                val label = when (category) { "HIDRATACAO" -> "HIDRATAÇÃO"; "ALIMENTACAO" -> "ALIMENTAÇÃO"; else -> "ATENÇÃO NA ROTINA" }
+                val timestamp = alert.timestamp
+                val time = timestamp.substringAfter('T').takeIf { it != timestamp }?.take(5) ?: timestamp.substringAfter(' ').take(5)
+                HomeAlert("api-alert-${alert.id}", label, alert.message, time.ifBlank { "agora" }, timestamp)
+            }
+        return (fromEvents + fromCamera).filterNot { it.id in dismissedHomeAlertIds }.maxByOrNull { it.sortKey }
+    }
+
+    fun dismissHomeAlert(id: String) { dismissedHomeAlertIds = dismissedHomeAlertIds + id }
 
     private suspend fun <T> safely(action: suspend () -> RepositoryResult<T>): RepositoryResult<T> = try {
         action()

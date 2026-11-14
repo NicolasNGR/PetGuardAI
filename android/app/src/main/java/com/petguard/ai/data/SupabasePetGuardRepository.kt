@@ -77,6 +77,9 @@ class SupabasePetGuardRepository : PetGuardRepository {
         mutate { content -> content.copy(events = (content.events.filterNot { it.id == event.id } + event).takeLast(300)) }
             .mapToUnit()
 
+    override suspend fun clearApiEvents(): RepositoryResult<Unit> =
+        mutate { content -> content.copy(events = content.events.filterNot { it.id.startsWith("api-alert-") }) }.mapToUnit()
+
     private suspend fun mutate(transform: (PetGuardContent) -> PetGuardContent): RepositoryResult<PetGuardContent> = cloudCall {
         val updated = transform(fetchContent())
         saveContent(updated)
@@ -160,7 +163,7 @@ class SupabasePetGuardRepository : PetGuardRepository {
     private fun PetGuardContent.toJson() = JSONObject()
         .put("tutor_name", tutor.name)
         .put("selected_pet_id", selectedPetId)
-        .put("pets", JSONArray().apply { pets.forEach { put(JSONObject().put("id", it.id).put("name", it.name).put("species", it.species).put("breed", it.breed).put("age_label", it.ageLabel)) } })
+        .put("pets", JSONArray().apply { pets.forEach { put(JSONObject().put("id", it.id).put("name", it.name).put("species", it.species).put("breed", it.breed).put("age_label", it.ageLabel).put("porte", it.porte).put("peso_kg", it.pesoKg ?: JSONObject.NULL)) } })
         .put("cameras", JSONArray().apply { cameras.forEach { put(JSONObject().put("id", it.id).put("name", it.name).put("url", it.url).put("connected", it.connected)) } })
         .put("events", JSONArray().apply { events.forEach { put(JSONObject().put("id", it.id).put("date", it.date).put("category", it.category.name).put("title", it.title).put("detail", it.detail).put("time_label", it.timeLabel).put("pet_id", it.petId)) } })
         .put("preferences", JSONObject().put("light_theme", preferences.lightTheme).put("color_accessible_palette", preferences.colorAccessiblePalette).put("yolo_enabled", preferences.yoloEnabled).put("notifications_enabled", preferences.notificationsEnabled))
@@ -169,7 +172,7 @@ class SupabasePetGuardRepository : PetGuardRepository {
         val petArray = optJSONArray("pets") ?: JSONArray()
         val pets = buildList {
             for (i in 0 until petArray.length()) petArray.optJSONObject(i)?.let { pet ->
-                add(PetProfile(pet.optString("id"), pet.optString("name"), pet.optString("species"), pet.optString("breed"), pet.optString("age_label")))
+                add(PetProfile(pet.optString("id"), pet.optString("name"), pet.optString("species"), pet.optString("breed"), pet.optString("age_label"), pet.optString("porte", "medio"), if (pet.isNull("peso_kg")) null else pet.optDouble("peso_kg")))
             }
         }
         val cameraArray = optJSONArray("cameras") ?: JSONArray()

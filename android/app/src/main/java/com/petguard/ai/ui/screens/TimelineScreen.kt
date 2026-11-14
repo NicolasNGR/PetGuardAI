@@ -7,6 +7,9 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.CalendarMonth
+import androidx.compose.material.icons.filled.WaterDrop
+import androidx.compose.material.icons.filled.Restaurant
+import androidx.compose.material.icons.filled.Pets
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
@@ -14,6 +17,7 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import androidx.compose.ui.graphics.Color
 import com.petguard.ai.data.EventCategory
 import com.petguard.ai.ui.components.PetAlertCard
 import com.petguard.ai.ui.theme.petSignalColors
@@ -67,8 +71,14 @@ fun TimelineScreen(vm: PetGuardViewModel) {
                     EventCategory.INJURY -> "Machucado" to signals.danger
                     EventCategory.HEALTHY -> "Saudável" to signals.healthy
                     EventCategory.ACTIVITY -> "Atividade" to signals.healthy
+                    else -> "Evento" to signals.info
                 }
-                PetAlertCard(label, event.title, event.detail, event.timeLabel, color)
+                when (event.category) {
+                    EventCategory.HIDRATACAO -> CategoryEventCard("Hidratação", event.title, event.detail, event.timeLabel, Color(0xFF00A6C7), Icons.Default.WaterDrop)
+                    EventCategory.ALIMENTACAO -> CategoryEventCard("Alimentação", event.title, event.detail, event.timeLabel, Color(0xFFFF9800), Icons.Default.Restaurant)
+                    EventCategory.PRESENCA -> CategoryEventCard("Presença", event.title, event.detail, event.timeLabel, Color(0xFF2E9D58), Icons.Default.Pets)
+                    else -> PetAlertCard(label, event.title, event.detail, formatEventTime(event.timeLabel), color)
+                }
                 Spacer(Modifier.height(14.dp))
             }
             vm.isLoading -> { LinearProgressIndicator(Modifier.fillMaxWidth()); Spacer(Modifier.height(12.dp)); Text("Carregando histórico…", color = MaterialTheme.colorScheme.onSurface) }
@@ -102,3 +112,24 @@ fun TimelineScreen(vm: PetGuardViewModel) {
         }
     }
 }
+
+@Composable
+private fun CategoryEventCard(label: String, title: String, detail: String, time: String, tint: Color, icon: androidx.compose.ui.graphics.vector.ImageVector) {
+    Surface(color = MaterialTheme.colorScheme.surface, shape = RoundedCornerShape(14.dp),
+        border = androidx.compose.foundation.BorderStroke(1.dp, tint.copy(alpha = .65f))) {
+        Row(Modifier.fillMaxWidth().padding(14.dp), verticalAlignment = Alignment.Top) {
+            Icon(icon, contentDescription = null, tint = tint, modifier = Modifier.size(22.dp))
+            Column(Modifier.weight(1f).padding(start = 10.dp)) {
+                Text(label.uppercase(), color = tint, style = MaterialTheme.typography.labelSmall)
+                Text(title, color = MaterialTheme.colorScheme.onSurface, style = MaterialTheme.typography.titleSmall)
+                Text(detail, color = MaterialTheme.colorScheme.onSurfaceVariant, style = MaterialTheme.typography.bodySmall)
+            }
+            Text(formatEventTime(time), color = MaterialTheme.colorScheme.onSurface, style = MaterialTheme.typography.labelMedium)
+        }
+    }
+}
+
+private fun formatEventTime(value: String): String = runCatching {
+    val raw = value.trim()
+    if (raw.matches(Regex("\\d{2}:\\d{2}"))) raw else java.time.LocalTime.parse(raw).format(DateTimeFormatter.ofPattern("HH:mm"))
+}.getOrDefault("--:--")

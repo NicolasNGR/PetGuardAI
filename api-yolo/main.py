@@ -237,10 +237,11 @@ def init_db():
             cursor.execute("ALTER TABLE alertas ADD COLUMN pet_nome TEXT")
 
         cursor.execute("""
-            CREATE TABLE IF NOT EXISTS estado_hidratacao (
+        CREATE TABLE IF NOT EXISTS estado_hidratacao (
                 pet_id TEXT PRIMARY KEY,
                 pet_nome TEXT NOT NULL,
                 pet_porte TEXT DEFAULT 'medio',
+                pet_peso REAL,
                 monitoramento_desde TEXT NOT NULL,
                 ultima_interacao_agua TEXT,
                 ultimo_aviso TEXT
@@ -249,12 +250,15 @@ def init_db():
         hyd_columns = {row[1] for row in cursor.execute("PRAGMA table_info(estado_hidratacao)").fetchall()}
         if "pet_porte" not in hyd_columns:
             cursor.execute("ALTER TABLE estado_hidratacao ADD COLUMN pet_porte TEXT DEFAULT 'medio'")
+        if "pet_peso" not in hyd_columns:
+            cursor.execute("ALTER TABLE estado_hidratacao ADD COLUMN pet_peso REAL")
 
         cursor.execute("""
             CREATE TABLE IF NOT EXISTS estado_alimentacao (
                 pet_id TEXT PRIMARY KEY,
                 pet_nome TEXT NOT NULL,
                 pet_porte TEXT DEFAULT 'medio',
+                pet_peso REAL,
                 monitoramento_desde TEXT NOT NULL,
                 ultima_interacao_comida TEXT,
                 ultimo_aviso TEXT
@@ -263,6 +267,8 @@ def init_db():
         feed_columns = {row[1] for row in cursor.execute("PRAGMA table_info(estado_alimentacao)").fetchall()}
         if "pet_porte" not in feed_columns:
             cursor.execute("ALTER TABLE estado_alimentacao ADD COLUMN pet_porte TEXT DEFAULT 'medio'")
+        if "pet_peso" not in feed_columns:
+            cursor.execute("ALTER TABLE estado_alimentacao ADD COLUMN pet_peso REAL")
 
         conn.commit()
 
@@ -331,6 +337,7 @@ def match_pet_by_visual_signature(
                 "pet_name": sig["pet_name"],
                 "pet_species": sig["pet_species"],
                 "pet_size": sig.get("pet_size", "medio"),
+                "pet_weight": sig.get("pet_weight"),
             }
 
     if best_pet is not None and best_score >= REID_SIMILARITY_THRESHOLD:
@@ -382,45 +389,62 @@ def point_inside_normalized_zone(point, zone, frame_width, frame_height):
     return x1 <= point[0] <= x2 and y1 <= point[1] <= y2
 
 
-def ensure_hydration_monitoring(pet_id, pet_name, now, pet_size="medio"):
+def get_pet_alert_thresholds(pet_size: str, pet_weight: float | None):
+    """Return water and food alert thresholds adjusted for the pet's size/weight."""
+    size = (pet_size or "medio").strip().casefold()
+    if pet_weight is not None:
+        factor = 0.75 if pet_weight < 10 else 1.25 if pet_weight > 25 else 1.0
+    elif size == "pequeno":
+        factor = 0.75
+    elif size == "grande":
+        factor = 1.25
+    else:
+        factor = 1.0
+    return (
+        max(1, int(HYDRATION_ALERT_AFTER_SECONDS * factor)),
+        max(1, int(FEEDING_ALERT_AFTER_SECONDS * factor)),
+    )
+
+
+def ensure_hydration_monitoring(pet_id, pet_name, now, pet_size="medio", pet_weight=None):
     with get_db() as conn:
         conn.execute(
-            "INSERT OR IGNORE INTO estado_hidratacao (pet_id, pet_nome, pet_porte, monitoramento_desde) VALUES (?, ?, ?, ?)",
-            (pet_id, pet_name, pet_size, now.isoformat(timespec="seconds")),
+            "INSERT OR IGNORE INTO estado_hidratacao (pet_id, pet_nome, pet_porte, pet_peso, monitoramento_desde) VALUES (?, ?, ?, ?, ?)",
+            (pet_id, pet_name, pet_size, pet_weight, now.isoformat(timespec="seconds")),
         )
-        conn.execute("UPDATE estado_hidratacao SET pet_nome = ?, pet_porte = ? WHERE pet_id = ?", (pet_name, pet_size, pet_id))
+        conn.execute("UPDATE estado_hidratacao SET pet_nome = ?, pet_porte = ?, pet_peso = ? WHERE pet_id = ?", (pet_name, pet_size, pet_weight, pet_id))
 
 
-def record_water_interaction(pet_id, pet_name, now, pet_size="medio"):
+def record_water_interaction(pet_id, pet_name, now, pet_size="medio", pet_weight=None):
     with get_db() as conn:
         conn.execute(
-            "INSERT OR IGNORE INTO estado_hidratacao (pet_id, pet_nome, pet_porte, monitoramento_desde) VALUES (?, ?, ?, ?)",
-            (pet_id, pet_name, pet_size, now.isoformat(timespec="seconds")),
+            "INSERT OR IGNORE INTO estado_hidratacao (pet_id, pet_nome, pet_porte, pet_peso, monitoramento_desde) VALUES (?, ?, ?, ?, ?)",
+            (pet_id, pet_name, pet_size, pet_weight, now.isoformat(timespec="seconds")),
         )
         conn.execute(
-            "UPDATE estado_hidratacao SET pet_nome = ?, pet_porte = ?, ultima_interacao_agua = ?, ultimo_aviso = NULL WHERE pet_id = ?",
-            (pet_name, pet_size, now.isoformat(timespec="seconds"), pet_id),
+            "UPDATE estado_hidratacao SET pet_nome = ?, pet_porte = ?, pet_peso = ?, ultima_interacao_agua = ?, ultimo_aviso = NULL WHERE pet_id = ?",
+            (pet_name, pet_size, pet_weight, now.isoformat(timespec="seconds"), pet_id),
         )
 
 
-def ensure_feeding_monitoring(pet_id, pet_name, now, pet_size="medio"):
+def ensure_feeding_monitoring(pet_id, pet_name, now, pet_size="medio", pet_weight=None):
     with get_db() as conn:
         conn.execute(
-            "INSERT OR IGNORE INTO estado_alimentacao (pet_id, pet_nome, pet_porte, monitoramento_desde) VALUES (?, ?, ?, ?)",
-            (pet_id, pet_name, pet_size, now.isoformat(timespec="seconds")),
+            "INSERT OR IGNORE INTO estado_alimentacao (pet_id, pet_nome, pet_porte, pet_peso, monitoramento_desde) VALUES (?, ?, ?, ?, ?)",
+            (pet_id, pet_name, pet_size, pet_weight, now.isoformat(timespec="seconds")),
         )
-        conn.execute("UPDATE estado_alimentacao SET pet_nome = ?, pet_porte = ? WHERE pet_id = ?", (pet_name, pet_size, pet_id))
+        conn.execute("UPDATE estado_alimentacao SET pet_nome = ?, pet_porte = ?, pet_peso = ? WHERE pet_id = ?", (pet_name, pet_size, pet_weight, pet_id))
 
 
-def record_food_interaction(pet_id, pet_name, now, pet_size="medio"):
+def record_food_interaction(pet_id, pet_name, now, pet_size="medio", pet_weight=None):
     with get_db() as conn:
         conn.execute(
-            "INSERT OR IGNORE INTO estado_alimentacao (pet_id, pet_nome, pet_porte, monitoramento_desde) VALUES (?, ?, ?, ?)",
-            (pet_id, pet_name, pet_size, now.isoformat(timespec="seconds")),
+            "INSERT OR IGNORE INTO estado_alimentacao (pet_id, pet_nome, pet_porte, pet_peso, monitoramento_desde) VALUES (?, ?, ?, ?, ?)",
+            (pet_id, pet_name, pet_size, pet_weight, now.isoformat(timespec="seconds")),
         )
         conn.execute(
-            "UPDATE estado_alimentacao SET pet_nome = ?, pet_porte = ?, ultima_interacao_comida = ?, ultimo_aviso = NULL WHERE pet_id = ?",
-            (pet_name, pet_size, now.isoformat(timespec="seconds"), pet_id),
+            "UPDATE estado_alimentacao SET pet_nome = ?, pet_porte = ?, pet_peso = ?, ultima_interacao_comida = ?, ultimo_aviso = NULL WHERE pet_id = ?",
+            (pet_name, pet_size, pet_weight, now.isoformat(timespec="seconds"), pet_id),
         )
 
 
@@ -441,10 +465,10 @@ def check_pet_routine_alerts(now):
         visible_pet_ids = {item["pet_id"] for item in latest_pet_detections if item.get("pet_id")}
     with pet_assignment_lock:
         assigned_pets = {
-            value["pet_id"]: (value["pet_name"], value.get("pet_size", "medio"))
+            value["pet_id"]: (value["pet_name"], value.get("pet_size", "medio"), value.get("pet_weight"))
             for value in pet_assignments.values()
         }
-    for pet_id, (pet_name, pet_size) in assigned_pets.items():
+    for pet_id, (pet_name, pet_size, pet_weight) in assigned_pets.items():
         if pet_id not in visible_pet_ids:
             continue
         now_monotonic = time.monotonic()
@@ -452,17 +476,18 @@ def check_pet_routine_alerts(now):
         if now_monotonic - last_check < 30:
             continue
         PET_MONITOR_CHECK_AT[pet_id] = now_monotonic
+        hydration_threshold, feeding_threshold = get_pet_alert_thresholds(pet_size, pet_weight)
         checks = (
-            ("agua", "estado_hidratacao", "ultima_interacao_agua", HYDRATION_ALERT_AFTER_SECONDS, "HIDRATACAO"),
-            ("comida", "estado_alimentacao", "ultima_interacao_comida", FEEDING_ALERT_AFTER_SECONDS, "ALIMENTACAO"),
+            ("agua", "estado_hidratacao", "ultima_interacao_agua", hydration_threshold, "HIDRATACAO"),
+            ("comida", "estado_alimentacao", "ultima_interacao_comida", feeding_threshold, "ALIMENTACAO"),
         )
         for zone_name, table, interaction_column, threshold, category in checks:
             if zone_name not in zones:
                 continue
             if table == "estado_hidratacao":
-                ensure_hydration_monitoring(pet_id, pet_name, now, pet_size)
+                ensure_hydration_monitoring(pet_id, pet_name, now, pet_size, pet_weight)
             else:
-                ensure_feeding_monitoring(pet_id, pet_name, now, pet_size)
+                ensure_feeding_monitoring(pet_id, pet_name, now, pet_size, pet_weight)
             with get_db() as conn:
                 state = conn.execute(
                     f"SELECT monitoramento_desde, {interaction_column}, ultimo_aviso FROM {table} WHERE pet_id = ?",
@@ -474,9 +499,9 @@ def check_pet_routine_alerts(now):
                 continue
             elapsed_label = _format_duration(threshold)
             if category == "HIDRATACAO":
-                message = f"A câmera não registrou {pet_name} na zona de água há {elapsed_label}. Confira se há água disponível."
+                message = f"A câmera não registrou {pet_name} (porte {pet_size}{f', {pet_weight:g} kg' if pet_weight is not None else ''}) na zona de água há {elapsed_label}. Confira se há água disponível."
             else:
-                message = f"A câmera não registrou {pet_name} na zona de ração há {elapsed_label}. Confirme se ele comeu; se realmente não comeu, procure orientação veterinária."
+                message = f"A câmera não registrou {pet_name} (porte {pet_size}{f', {pet_weight:g} kg' if pet_weight is not None else ''}) na zona de ração há {elapsed_label}. Confirme se ele comeu; se realmente não comeu, procure orientação veterinária."
             create_pet_alert(category, message, pet_id, pet_name, "atencao")
             with get_db() as conn:
                 conn.execute(f"UPDATE {table} SET ultimo_aviso = ? WHERE pet_id = ?", (now.isoformat(timespec="seconds"), pet_id))
@@ -587,6 +612,7 @@ def update_live_pet_detections(result, frame_shape, raw_frame: np.ndarray | None
                 "pet_id": assignment.get("pet_id", ""),
                 "pet_name": assignment.get("pet_name", ""),
                 "pet_size": assignment.get("pet_size", ""),
+                "pet_weight": assignment.get("pet_weight"),
             }
             detections.append(detection)
 
@@ -598,6 +624,7 @@ def update_live_pet_detections(result, frame_shape, raw_frame: np.ndarray | None
                         "pet_id": detection["pet_id"],
                         "pet_name": detection["pet_name"],
                         "pet_size": detection.get("pet_size") or "medio",
+                        "pet_weight": detection.get("pet_weight"),
                         "started_at": now,
                         "last_seen": now,
                         "recorded": False,
@@ -609,7 +636,7 @@ def update_live_pet_detections(result, frame_shape, raw_frame: np.ndarray | None
                 if duration >= 3 and not session["recorded"]:
                     recorder = record_water_interaction if interaction == "HIDRATACAO" else record_food_interaction
                     category_label = "zona de água" if interaction == "HIDRATACAO" else "zona de ração"
-                    recorder(detection["pet_id"], detection["pet_name"], now, session["pet_size"])
+                    recorder(detection["pet_id"], detection["pet_name"], now, session["pet_size"], session.get("pet_weight"))
                     create_pet_alert(
                         interaction,
                         f"A câmera registrou {detection['pet_name']} na {category_label}. Isso confirma presença na área, não ingestão.",
@@ -634,7 +661,7 @@ def update_live_pet_detections(result, frame_shape, raw_frame: np.ndarray | None
                 continue
             duration = (session["last_seen"] - session["started_at"]).total_seconds()
             if duration >= 3 and not session["recorded"]:
-                recorder(session["pet_id"], session["pet_name"], now, session.get("pet_size", "medio"))
+                recorder(session["pet_id"], session["pet_name"], now, session.get("pet_size", "medio"), session.get("pet_weight"))
                 category_label = "zona de água" if interaction_name == "HIDRATACAO" else "zona de ração"
                 create_pet_alert(
                     interaction_name,
@@ -731,8 +758,17 @@ def associar_deteccao_a_pet(payload: dict = Body(...), user: dict = Depends(requ
     pet_name = " ".join(str(payload.get("pet_name", "")).split())[:60]
     pet_species = str(payload.get("pet_species", "")).strip().casefold()
     pet_size = str(payload.get("pet_size") or payload.get("porte") or "medio").strip().casefold()
-    if pet_size not in ("pequeno", "medio", "médio", "grande"):
+    if pet_size == "médio":
         pet_size = "medio"
+    if pet_size not in ("pequeno", "medio", "grande"):
+        pet_size = "medio"
+    raw_weight = payload.get("pet_weight", payload.get("pesoKg"))
+    try:
+        pet_weight = None if raw_weight is None or str(raw_weight).strip() == "" else float(raw_weight)
+    except (TypeError, ValueError):
+        raise HTTPException(status_code=422, detail="O peso do pet deve ser um número em kg.")
+    if pet_weight is not None and (not math.isfinite(pet_weight) or pet_weight <= 0 or pet_weight > 200):
+        raise HTTPException(status_code=422, detail="Informe um peso válido entre 0 e 200 kg.")
 
     with camera_state_lock:
         current_detection = next((item for item in latest_pet_detections if item["track_id"] == track_id), None)
@@ -763,6 +799,7 @@ def associar_deteccao_a_pet(payload: dict = Body(...), user: dict = Depends(requ
                 "pet_name": pet_name,
                 "pet_species": pet_species,
                 "pet_size": pet_size,
+                "pet_weight": pet_weight,
             }
             # Captura e salva a assinatura visual HSV do pet para Re-ID automático futuro
             if frame_snapshot is not None and current_box is not None:
@@ -772,6 +809,7 @@ def associar_deteccao_a_pet(payload: dict = Body(...), user: dict = Depends(requ
                         "pet_name": pet_name,
                         "pet_species": pet_species,
                         "pet_size": pet_size,
+                        "pet_weight": pet_weight,
                         "hist": hist,
                     }
 
@@ -781,22 +819,26 @@ def associar_deteccao_a_pet(payload: dict = Body(...), user: dict = Depends(requ
         if not old_still_assigned:
             pet_presence_states.pop(old_pet_id, None)
 
-    if pet_id and pet_name and not previously_assigned:
+    if pet_id and pet_name:
         now = datetime.datetime.now().astimezone().isoformat(timespec="seconds")
         with get_db() as conn:
             conn.execute(
-                "INSERT INTO estado_hidratacao (pet_id, pet_nome, pet_porte, monitoramento_desde, ultima_interacao_agua, ultimo_aviso) "
-                "VALUES (?, ?, ?, ?, NULL, NULL) ON CONFLICT(pet_id) DO UPDATE SET "
-                "pet_nome = excluded.pet_nome, pet_porte = excluded.pet_porte, monitoramento_desde = excluded.monitoramento_desde, "
-                "ultima_interacao_agua = NULL, ultimo_aviso = NULL",
-                (pet_id, pet_name, pet_size, now),
+                "INSERT INTO estado_hidratacao (pet_id, pet_nome, pet_porte, pet_peso, monitoramento_desde, ultima_interacao_agua, ultimo_aviso) "
+                "VALUES (?, ?, ?, ?, ?, NULL, NULL) ON CONFLICT(pet_id) DO UPDATE SET "
+                "pet_nome = excluded.pet_nome, pet_porte = excluded.pet_porte, pet_peso = excluded.pet_peso, "
+                "monitoramento_desde = CASE WHEN ? THEN excluded.monitoramento_desde ELSE estado_hidratacao.monitoramento_desde END, "
+                "ultima_interacao_agua = CASE WHEN ? THEN NULL ELSE estado_hidratacao.ultima_interacao_agua END, "
+                "ultimo_aviso = CASE WHEN ? THEN NULL ELSE estado_hidratacao.ultimo_aviso END",
+                (pet_id, pet_name, pet_size, pet_weight, now, int(not previously_assigned), int(not previously_assigned), int(not previously_assigned)),
             )
             conn.execute(
-                "INSERT INTO estado_alimentacao (pet_id, pet_nome, pet_porte, monitoramento_desde, ultima_interacao_comida, ultimo_aviso) "
-                "VALUES (?, ?, ?, ?, NULL, NULL) ON CONFLICT(pet_id) DO UPDATE SET "
-                "pet_nome = excluded.pet_nome, pet_porte = excluded.pet_porte, monitoramento_desde = excluded.monitoramento_desde, "
-                "ultima_interacao_comida = NULL, ultimo_aviso = NULL",
-                (pet_id, pet_name, pet_size, now),
+                "INSERT INTO estado_alimentacao (pet_id, pet_nome, pet_porte, pet_peso, monitoramento_desde, ultima_interacao_comida, ultimo_aviso) "
+                "VALUES (?, ?, ?, ?, ?, NULL, NULL) ON CONFLICT(pet_id) DO UPDATE SET "
+                "pet_nome = excluded.pet_nome, pet_porte = excluded.pet_porte, pet_peso = excluded.pet_peso, "
+                "monitoramento_desde = CASE WHEN ? THEN excluded.monitoramento_desde ELSE estado_alimentacao.monitoramento_desde END, "
+                "ultima_interacao_comida = CASE WHEN ? THEN NULL ELSE estado_alimentacao.ultima_interacao_comida END, "
+                "ultimo_aviso = CASE WHEN ? THEN NULL ELSE estado_alimentacao.ultimo_aviso END",
+                (pet_id, pet_name, pet_size, pet_weight, now, int(not previously_assigned), int(not previously_assigned), int(not previously_assigned)),
             )
         PET_MONITOR_CHECK_AT.pop(pet_id, None)
     elif removed_assignment:
@@ -806,7 +848,41 @@ def associar_deteccao_a_pet(payload: dict = Body(...), user: dict = Depends(requ
         if not still_assigned:
             pet_presence_states.pop(old_pet_id, None)
 
-    return {"track_id": track_id, "pet_id": pet_id, "pet_name": pet_name, "pet_size": pet_size, "reid_saved": pet_id in pet_visual_signatures}
+    return {"track_id": track_id, "pet_id": pet_id, "pet_name": pet_name, "pet_size": pet_size, "pet_weight": pet_weight, "reid_saved": pet_id in pet_visual_signatures}
+
+
+@app.get("/pets/{pet_id}/metas")
+def get_pet_daily_goals(pet_id: str, user: dict = Depends(require_camera_owner)):
+    with get_db() as conn:
+        row = conn.execute(
+            "SELECT pet_porte, pet_peso FROM estado_hidratacao WHERE pet_id = ?",
+            (pet_id[:80],),
+        ).fetchone()
+        if row is None:
+            row = conn.execute(
+                "SELECT pet_porte, pet_peso FROM estado_alimentacao WHERE pet_id = ?",
+                (pet_id[:80],),
+            ).fetchone()
+    if row is None:
+        raise HTTPException(status_code=404, detail="Pet não encontrado. Associe uma detecção primeiro.")
+
+    pet_size = (row["pet_porte"] or "medio").casefold()
+    default_weights = {"pequeno": 6.0, "medio": 16.0, "médio": 16.0, "grande": 30.0}
+    pet_weight = row["pet_peso"]
+    reference_weight = float(pet_weight if pet_weight is not None else default_weights.get(pet_size, 16.0))
+    hydration_ml = round(reference_weight * 55)
+    calories_kcal = round(140 * (reference_weight ** 0.75))
+    food_grams = round(calories_kcal / 3.5)
+    return {
+        "pet_id": pet_id,
+        "pet_size": "medio" if pet_size == "médio" else pet_size,
+        "pet_weight": pet_weight,
+        "peso_referencia_kg": reference_weight,
+        "meta_hidrica_ml_dia": hydration_ml,
+        "meta_calorica_kcal_dia": calories_kcal,
+        "densidade_energetica_kcal_g": 3.5,
+        "meta_racao_gramas_dia": food_grams,
+    }
 
 
 @app.post("/analisar-frame")

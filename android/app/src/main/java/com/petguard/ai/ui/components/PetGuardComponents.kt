@@ -33,7 +33,8 @@ fun PetBottomBar(selected: PetGuardPage, light: Boolean, onSelect: (PetGuardPage
 }
 
 @Composable
-fun PetAlertCard(title: String, headline: String, detail: String, time: String, accent: Color, modifier: Modifier = Modifier) {
+fun PetAlertCard(title: String, headline: String, detail: String, time: String, accent: Color, modifier: Modifier = Modifier,
+    actionLabel: String? = null, onAction: (() -> Unit)? = null) {
     val signalIcon = when {
         title.contains("Saudável", ignoreCase = true) -> Icons.Default.CheckCircle
         title.contains("Machucado", ignoreCase = true) -> Icons.Default.Report
@@ -51,6 +52,9 @@ fun PetAlertCard(title: String, headline: String, detail: String, time: String, 
             }
             Text(headline, Modifier.padding(start = 28.dp, top = 6.dp), color = MaterialTheme.colorScheme.onSurface, fontSize = 15.sp)
             Text(detail, Modifier.padding(start = 28.dp, top = 4.dp), color = MaterialTheme.colorScheme.onSurface.copy(alpha = .82f), fontSize = 12.sp)
+            if (actionLabel != null && onAction != null) {
+                TextButton(onClick = onAction, modifier = Modifier.align(Alignment.End)) { Text(actionLabel) }
+            }
         }
     }
 }

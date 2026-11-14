@@ -45,7 +45,9 @@ object PetGuardAlertsApi {
 
     suspend fun fetchDetections(cameraPageUrl: String): List<LivePetDetection> = withContext(Dispatchers.IO) {
         val body = request(cameraPageUrl, "/detections")
-        val array = JSONObject(body).optJSONArray("detections") ?: JSONArray()
+        val response = JSONObject(body)
+        val yoloEnabled = response.optBoolean("yolo_enabled", true)
+        val array = response.optJSONArray("detections") ?: JSONArray()
         buildList {
             for (index in 0 until array.length()) {
                 val item = array.optJSONObject(index) ?: continue
@@ -55,7 +57,12 @@ object PetGuardAlertsApi {
                     confidence = item.optDouble("confidence", 0.0).toFloat(),
                     interaction = item.optString("interaction").takeUnless { it == "null" || it.isBlank() },
                     petId = item.optString("pet_id"),
-                    petName = item.optString("pet_name")
+                    petName = item.optString("pet_name"),
+                    activity = item.optString("activity"),
+                    nivelAtividade = item.optString("nivel_atividade"),
+                    displacementPixels = item.optDouble("displacement_pixels", 0.0),
+                    petSize = item.optString("pet_size", "medio"),
+                    yoloEnabled = yoloEnabled
                 ))
             }
         }.filter { it.trackId >= 0 && it.species in setOf("dog", "cat") }
@@ -67,7 +74,37 @@ object PetGuardAlertsApi {
             .put("pet_id", pet?.id.orEmpty())
             .put("pet_name", pet?.name.orEmpty())
             .put("pet_species", pet?.species.orEmpty().lowercase())
+            .put("pet_size", pet?.porte ?: "medio")
+        pet?.pesoKg?.let { payload.put("pet_weight", it) }
         request(cameraPageUrl, "/detections/assign", "POST", payload.toString())
+    }
+
+    suspend fun fetchPetDailyGoals(cameraPageUrl: String, petId: String): PetDailyGoals = withContext(Dispatchers.IO) {
+        val path = "/pets/${Uri.encode(petId)}/metas"
+        val response = JSONObject(request(cameraPageUrl, path))
+        PetDailyGoals(
+            petId = response.optString("pet_id", petId),
+            referenceWeightKg = response.optDouble("peso_referencia_kg", 16.0),
+            hydrationMlDaily = response.optInt("meta_hidrica_ml_dia"),
+            caloriesKcalDaily = response.optInt("meta_calorica_kcal_dia"),
+            foodGramsDaily = response.optInt("meta_racao_gramas_dia")
+        )
+    }
+
+    suspend fun setYoloEnabled(cameraPageUrl: String, enabled: Boolean) = withContext(Dispatchers.IO) {
+        request(cameraPageUrl, "/camera/yolo", "POST", JSONObject().put("enabled", enabled).toString())
+    }
+
+    suspend fun fetchYoloEnabled(cameraPageUrl: String): Boolean = withContext(Dispatchers.IO) {
+        JSONObject(request(cameraPageUrl, "/camera/yolo")).optBoolean("yolo_enabled", true)
+    }
+
+    suspend fun fetchCameraSnapshot(cameraPageUrl: String): ByteArray = withContext(Dispatchers.IO) {
+        requestBytes(cameraPageUrl, "/camera/snapshot")
+    }
+
+    suspend fun resetDemo(cameraPageUrl: String) = withContext(Dispatchers.IO) {
+        request(cameraPageUrl, "/admin/reset-demo", "POST", "{}")
     }
 
     suspend fun fetchZones(cameraPageUrl: String): Map<String, CameraZone> = withContext(Dispatchers.IO) {
@@ -91,6 +128,12 @@ object PetGuardAlertsApi {
     }
 
     private suspend fun request(baseUrl: String, path: String, method: String = "GET", body: String? = null): String {
+        return requestRaw(baseUrl, path, method, body).toString(Charsets.UTF_8)
+    }
+
+    private suspend fun requestBytes(baseUrl: String, path: String): ByteArray = requestRaw(baseUrl, path, "GET", null)
+
+    private suspend fun requestRaw(baseUrl: String, path: String, method: String, body: String?): ByteArray {
         val firebaseUser = FirebaseAuth.getInstance().currentUser
             ?: throw IllegalStateException("Entre na sua conta PetGuard para acessar a câmera.")
         val idToken = firebaseUser.getIdToken(false).awaitResult().token
@@ -105,7 +148,7 @@ object PetGuardAlertsApi {
             connection.requestMethod = method
             connection.connectTimeout = 5_000
             connection.readTimeout = 8_000
-            connection.setRequestProperty("Accept", "application/json")
+            connection.setRequestProperty("Accept", if (path == "/camera/snapshot") "image/jpeg" else "application/json")
             connection.setRequestProperty("Authorization", "Bearer $idToken")
             if (body != null) {
                 connection.doOutput = true
@@ -114,7 +157,7 @@ object PetGuardAlertsApi {
             }
             val code = connection.responseCode
             val stream = if (code in 200..299) connection.inputStream else connection.errorStream
-            val response = stream?.bufferedReader()?.use { it.readText() }.orEmpty()
+            val response = stream?.use { it.readBytes() } ?: ByteArray(0)
             if (code !in 200..299) {
                 val message = when (code) {
                     401 -> "Sessão expirada. Entre novamente no PetGuard."
