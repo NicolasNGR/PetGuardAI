@@ -8,6 +8,7 @@ import org.json.JSONArray
 import java.net.HttpURLConnection
 import java.net.URL
 import com.google.firebase.auth.FirebaseAuth
+import com.petguard.ai.BuildConfig
 import com.petguard.ai.data.awaitResult
 
 /** Cliente mínimo para os metadados de alerta da API local; não baixa nem armazena vídeo. */
@@ -134,11 +135,13 @@ object PetGuardAlertsApi {
     private suspend fun requestBytes(baseUrl: String, path: String): ByteArray = requestRaw(baseUrl, path, "GET", null)
 
     private suspend fun requestRaw(baseUrl: String, path: String, method: String, body: String?): ByteArray {
-        val firebaseUser = FirebaseAuth.getInstance().currentUser
-            ?: throw IllegalStateException("Entre na sua conta PetGuard para acessar a câmera.")
-        val idToken = firebaseUser.getIdToken(false).awaitResult().token
+        val firebaseUser = runCatching { FirebaseAuth.getInstance().currentUser }.getOrNull()
+        val localPreviewEnabled = BuildConfig.DEBUG && BuildConfig.SUPABASE_PUBLISHABLE_KEY.isBlank()
+        val firebaseToken = runCatching { firebaseUser?.getIdToken(false)?.awaitResult()?.token }.getOrNull()
             ?.takeIf { it.isNotBlank() }
-            ?: throw IllegalStateException("Não foi possível validar sua sessão Firebase.")
+        val idToken = firebaseToken
+            ?: if (localPreviewEnabled) "dev-local-token"
+            else throw IllegalStateException("Entre na sua conta PetGuard para acessar a câmera.")
         val parsedPath = path.substringBefore('?')
         val query = path.substringAfter('?', "")
         val endpointBuilder = Uri.parse(baseUrl).buildUpon().path(parsedPath).clearQuery()
