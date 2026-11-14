@@ -1,6 +1,6 @@
 from fastapi import FastAPI, File, UploadFile, HTTPException, Body, Query, Header, Depends
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import HTMLResponse, StreamingResponse
+from fastapi.responses import HTMLResponse, StreamingResponse, Response
 from contextlib import asynccontextmanager, contextmanager
 from ultralytics import YOLO
 import cv2
@@ -21,16 +21,18 @@ from google.auth.transport import requests as google_requests
 from google.oauth2 import id_token
 import cachecontrol
 import requests
+
 try:
     from zeroconf import IPVersion, ServiceInfo, Zeroconf
 except ImportError:
     IPVersion = ServiceInfo = Zeroconf = None
 
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     init_db()
     global model
-    model = YOLO('yolov8n.pt')
+    model = YOLO("yolov8n.pt")
     start_camera_discovery()
     try:
         yield
@@ -38,19 +40,20 @@ async def lifespan(app: FastAPI):
         stop_camera_capture()
         stop_camera_discovery()
 
+
 app = FastAPI(
     title="PetGuard AI Backend",
-    description="API Completa com ROI, Controle de Sessão de Alimentação e Métricas de Atividade Física",
-    version="4.0.0",
+    description="API Completa com ROI, Re-ID Visual HSV, Controle YOLO e Métricas de Atividade Física",
+    version="5.0.0",
     docs_url=None,
     redoc_url=None,
     openapi_url=None,
-    lifespan=lifespan
+    lifespan=lifespan,
 )
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=[],
+    allow_origins=["*"],
     allow_credentials=False,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -62,6 +65,7 @@ STREAM_TOKEN_TTL_SECONDS = max(60, min(3600, int(os.getenv("PETGUARD_STREAM_TOKE
 _stream_signing_secret = os.getenv("PETGUARD_STREAM_SIGNING_SECRET", "").encode("utf-8") or secrets.token_bytes(32)
 _google_session = cachecontrol.CacheControl(requests.Session())
 _google_auth_request = google_requests.Request(session=_google_session)
+
 history_classes = defaultdict(list)
 alert_lock = threading.Lock()
 camera_control_lock = threading.Lock()
@@ -70,25 +74,36 @@ yolo_inference_lock = threading.Lock()
 pet_assignment_lock = threading.Lock()
 camera_stop_event = threading.Event()
 camera_stop_event.set()
+
 camera_thread = None
 latest_camera_jpeg = None
+latest_raw_frame = None  # Frame limpo sem bounding boxes para snapshot de ROI e Re-ID
 camera_status = "desconectada"
+yolo_enabled = True
+
 discovery_server = None
 discovery_info = None
 discovery_ready = False
+
 latest_pet_detections = []
-pet_assignments = {}
+latest_track_boxes = {}       # {track_id: [x1, y1, x2, y2]}
+pet_assignments = {}          # {track_id: {"pet_id": ..., "pet_name": ..., "pet_species": ..., "pet_size": ...}}
+pet_visual_signatures = {}    # {pet_id: {"pet_name": ..., "pet_species": ..., "pet_size": ..., "hist": np.ndarray}}
+
 water_interaction_sessions = {}
 food_interaction_sessions = {}
 PET_MONITOR_CHECK_AT = {}
 pet_presence_states = {}
+
 HYDRATION_ALERT_AFTER_SECONDS = max(60, int(os.getenv("PETGUARD_HYDRATION_ALERT_SECONDS", "28800")))
 FEEDING_ALERT_AFTER_SECONDS = max(60, int(os.getenv("PETGUARD_FEEDING_ALERT_SECONDS", "43200")))
-PRESENCE_LOST_AFTER_SECONDS = max(5, int(os.getenv("PETGUARD_PRESENCE_LOST_SECONDS", "15")))
+PRESENCE_LOST_AFTER_SECONDS = max(5, int(os.getenv("PETGUARD_PRESENCE_LOST_SECONDS", "120")))
+REID_SIMILARITY_THRESHOLD = float(os.getenv("PETGUARD_REID_THRESHOLD", "0.68"))
 
 # Armazenamento de posições anteriores e sessões na memória do processo
 posicoes_anteriores = {}  # {track_id: (x, y)}
-sessoes_interacao = {}   # {track_id: {"tipo": "ALIMENTACAO", "inicio": dt, "ultima_vista": dt}}
+live_prev_positions = {}  # {track_id: (x, y)}
+sessoes_interacao = {}    # {track_id: {"tipo": "ALIMENTACAO", "inicio": dt, "ultima_vista": dt}}
 
 
 def require_firebase_user(authorization: str | None = Header(default=None)):
@@ -156,6 +171,7 @@ def _verify_stream_token(token: str) -> str:
     except Exception:
         raise HTTPException(status_code=401, detail="Sessão da câmera expirada. Reabra a câmera pelo app.")
 
+
 @contextmanager
 def get_db():
     conn = sqlite3.connect(DB_PATH)
@@ -169,6 +185,7 @@ def get_db():
     finally:
         conn.close()
 
+
 def init_db():
     with get_db() as conn:
         cursor = conn.cursor()
@@ -178,22 +195,18 @@ def init_db():
                 firebase_uid TEXT NOT NULL UNIQUE
             )
         """)
-        # Zonas de Interesse (ROI) configuradas no App pelo usuário
         cursor.execute("""
-
             CREATE TABLE IF NOT EXISTS zonas_roi (
-                tipo TEXT PRIMARY KEY, -- 'comida' ou 'agua'
+                tipo TEXT PRIMARY KEY,
                 x1 REAL, y1 REAL, x2 REAL, y2 REAL
             )
         """)
-        # Configuração legada de cores
         cursor.execute("""
             CREATE TABLE IF NOT EXISTS configuracao_potes (
                 tipo_pote TEXT PRIMARY KEY,
                 cor_predominante TEXT
             )
         """)
-        # Registro de Eventos (Alimentação, Hidratação, Atividade)
         cursor.execute("""
             CREATE TABLE IF NOT EXISTS registro_eventos (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -205,7 +218,6 @@ def init_db():
                 deslocamento_pixels REAL
             )
         """)
-        # Alertas prioritários
         cursor.execute("""
             CREATE TABLE IF NOT EXISTS alertas (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -223,25 +235,120 @@ def init_db():
             cursor.execute("ALTER TABLE alertas ADD COLUMN pet_id TEXT")
         if "pet_nome" not in alert_columns:
             cursor.execute("ALTER TABLE alertas ADD COLUMN pet_nome TEXT")
+
         cursor.execute("""
             CREATE TABLE IF NOT EXISTS estado_hidratacao (
                 pet_id TEXT PRIMARY KEY,
                 pet_nome TEXT NOT NULL,
+                pet_porte TEXT DEFAULT 'medio',
                 monitoramento_desde TEXT NOT NULL,
                 ultima_interacao_agua TEXT,
                 ultimo_aviso TEXT
             )
         """)
+        hyd_columns = {row[1] for row in cursor.execute("PRAGMA table_info(estado_hidratacao)").fetchall()}
+        if "pet_porte" not in hyd_columns:
+            cursor.execute("ALTER TABLE estado_hidratacao ADD COLUMN pet_porte TEXT DEFAULT 'medio'")
+
         cursor.execute("""
             CREATE TABLE IF NOT EXISTS estado_alimentacao (
                 pet_id TEXT PRIMARY KEY,
                 pet_nome TEXT NOT NULL,
+                pet_porte TEXT DEFAULT 'medio',
                 monitoramento_desde TEXT NOT NULL,
                 ultima_interacao_comida TEXT,
                 ultimo_aviso TEXT
             )
         """)
+        feed_columns = {row[1] for row in cursor.execute("PRAGMA table_info(estado_alimentacao)").fetchall()}
+        if "pet_porte" not in feed_columns:
+            cursor.execute("ALTER TABLE estado_alimentacao ADD COLUMN pet_porte TEXT DEFAULT 'medio'")
+
         conn.commit()
+
+
+# ==============================================================================
+# RE-IDENTIFICAÇÃO VISUAL POR HISTOGRAMA HSV (SOLUÇÃO 1)
+# ==============================================================================
+
+def extract_pet_color_signature(frame: np.ndarray, box: list | tuple) -> np.ndarray | None:
+    """
+    Recorta os 60% centrais da bounding box do animal (descartando 20% das bordas
+    para evitar interferência de piso/cobertor) e calcula um histograma HSV normalizado.
+    """
+    if frame is None or box is None or len(box) < 4:
+        return None
+    h, w = frame.shape[:2]
+    x1, y1, x2, y2 = [float(v) for v in box[:4]]
+    bw = x2 - x1
+    bh = y2 - y1
+    if bw < 12 or bh < 12:
+        return None
+
+    cx1 = max(0, int(x1 + bw * 0.20))
+    cy1 = max(0, int(y1 + bh * 0.20))
+    cx2 = min(w, int(x2 - bw * 0.20))
+    cy2 = min(h, int(y2 - bh * 0.20))
+
+    if cx2 <= cx1 or cy2 <= cy1:
+        return None
+
+    crop = frame[cy1:cy2, cx1:cx2]
+    hsv = cv2.cvtColor(crop, cv2.COLOR_BGR2HSV)
+    hist = cv2.calcHist([hsv], [0, 1, 2], None, [16, 16, 8], [0, 180, 0, 256, 0, 256])
+    cv2.normalize(hist, hist, alpha=0, beta=1, norm_type=cv2.NORM_MINMAX)
+    return hist
+
+
+def match_pet_by_visual_signature(
+    frame: np.ndarray,
+    box: list | tuple,
+    expected_species: str,
+    already_used_pet_ids: set[str],
+) -> dict | None:
+    """
+    Compara o histograma atual com as assinaturas salvas da mesma espécie.
+    Retorna o dicionário do pet se atingir o limiar de similaridade.
+    """
+    if frame is None or not pet_visual_signatures:
+        return None
+    candidate_hist = extract_pet_color_signature(frame, box)
+    if candidate_hist is None:
+        return None
+
+    best_score = -1.0
+    best_pet = None
+    for pet_id, sig in pet_visual_signatures.items():
+        if pet_id in already_used_pet_ids:
+            continue
+        if sig.get("pet_species") != expected_species:
+            continue
+        score = float(cv2.compareHist(candidate_hist, sig["hist"], cv2.HISTCMP_CORREL))
+        if score > best_score:
+            best_score = score
+            best_pet = {
+                "pet_id": pet_id,
+                "pet_name": sig["pet_name"],
+                "pet_species": sig["pet_species"],
+                "pet_size": sig.get("pet_size", "medio"),
+            }
+
+    if best_pet is not None and best_score >= REID_SIMILARITY_THRESHOLD:
+        return best_pet
+    return None
+
+
+def classify_activity(displacement: float) -> str:
+    if displacement < 2.0:
+        return "Repouso / Inativo"
+    if displacement < 15.0:
+        return "Atividade Moderada"
+    return "Movimentação Intensa"
+
+
+# ==============================================================================
+# ALERTAS E MONITORAMENTO DE ROTINA
+# ==============================================================================
 
 def create_pet_alert(category, message, pet_id, pet_name, priority="informativo"):
     if not pet_id or not pet_name:
@@ -262,7 +369,6 @@ def load_roi_zones():
 
 
 def normalize_legacy_zone(zone):
-    # Versões anteriores enviavam coordenadas de pixels em um quadro 640x640.
     if max(zone.values()) > 1.0:
         return {key: max(0.0, min(1.0, value / 640.0)) for key, value in zone.items()}
     return zone
@@ -276,45 +382,45 @@ def point_inside_normalized_zone(point, zone, frame_width, frame_height):
     return x1 <= point[0] <= x2 and y1 <= point[1] <= y2
 
 
-def ensure_hydration_monitoring(pet_id, pet_name, now):
+def ensure_hydration_monitoring(pet_id, pet_name, now, pet_size="medio"):
     with get_db() as conn:
         conn.execute(
-            "INSERT OR IGNORE INTO estado_hidratacao (pet_id, pet_nome, monitoramento_desde) VALUES (?, ?, ?)",
-            (pet_id, pet_name, now.isoformat(timespec="seconds")),
+            "INSERT OR IGNORE INTO estado_hidratacao (pet_id, pet_nome, pet_porte, monitoramento_desde) VALUES (?, ?, ?, ?)",
+            (pet_id, pet_name, pet_size, now.isoformat(timespec="seconds")),
         )
-        conn.execute("UPDATE estado_hidratacao SET pet_nome = ? WHERE pet_id = ?", (pet_name, pet_id))
+        conn.execute("UPDATE estado_hidratacao SET pet_nome = ?, pet_porte = ? WHERE pet_id = ?", (pet_name, pet_size, pet_id))
 
 
-def record_water_interaction(pet_id, pet_name, now):
+def record_water_interaction(pet_id, pet_name, now, pet_size="medio"):
     with get_db() as conn:
         conn.execute(
-            "INSERT OR IGNORE INTO estado_hidratacao (pet_id, pet_nome, monitoramento_desde) VALUES (?, ?, ?)",
-            (pet_id, pet_name, now.isoformat(timespec="seconds")),
+            "INSERT OR IGNORE INTO estado_hidratacao (pet_id, pet_nome, pet_porte, monitoramento_desde) VALUES (?, ?, ?, ?)",
+            (pet_id, pet_name, pet_size, now.isoformat(timespec="seconds")),
         )
         conn.execute(
-            "UPDATE estado_hidratacao SET pet_nome = ?, ultima_interacao_agua = ?, ultimo_aviso = NULL WHERE pet_id = ?",
-            (pet_name, now.isoformat(timespec="seconds"), pet_id),
+            "UPDATE estado_hidratacao SET pet_nome = ?, pet_porte = ?, ultima_interacao_agua = ?, ultimo_aviso = NULL WHERE pet_id = ?",
+            (pet_name, pet_size, now.isoformat(timespec="seconds"), pet_id),
         )
 
 
-def ensure_feeding_monitoring(pet_id, pet_name, now):
+def ensure_feeding_monitoring(pet_id, pet_name, now, pet_size="medio"):
     with get_db() as conn:
         conn.execute(
-            "INSERT OR IGNORE INTO estado_alimentacao (pet_id, pet_nome, monitoramento_desde) VALUES (?, ?, ?)",
-            (pet_id, pet_name, now.isoformat(timespec="seconds")),
+            "INSERT OR IGNORE INTO estado_alimentacao (pet_id, pet_nome, pet_porte, monitoramento_desde) VALUES (?, ?, ?, ?)",
+            (pet_id, pet_name, pet_size, now.isoformat(timespec="seconds")),
         )
-        conn.execute("UPDATE estado_alimentacao SET pet_nome = ? WHERE pet_id = ?", (pet_name, pet_id))
+        conn.execute("UPDATE estado_alimentacao SET pet_nome = ?, pet_porte = ? WHERE pet_id = ?", (pet_name, pet_size, pet_id))
 
 
-def record_food_interaction(pet_id, pet_name, now):
+def record_food_interaction(pet_id, pet_name, now, pet_size="medio"):
     with get_db() as conn:
         conn.execute(
-            "INSERT OR IGNORE INTO estado_alimentacao (pet_id, pet_nome, monitoramento_desde) VALUES (?, ?, ?)",
-            (pet_id, pet_name, now.isoformat(timespec="seconds")),
+            "INSERT OR IGNORE INTO estado_alimentacao (pet_id, pet_nome, pet_porte, monitoramento_desde) VALUES (?, ?, ?, ?)",
+            (pet_id, pet_name, pet_size, now.isoformat(timespec="seconds")),
         )
         conn.execute(
-            "UPDATE estado_alimentacao SET pet_nome = ?, ultima_interacao_comida = ?, ultimo_aviso = NULL WHERE pet_id = ?",
-            (pet_name, now.isoformat(timespec="seconds"), pet_id),
+            "UPDATE estado_alimentacao SET pet_nome = ?, pet_porte = ?, ultima_interacao_comida = ?, ultimo_aviso = NULL WHERE pet_id = ?",
+            (pet_name, pet_size, now.isoformat(timespec="seconds"), pet_id),
         )
 
 
@@ -334,8 +440,11 @@ def check_pet_routine_alerts(now):
     with camera_state_lock:
         visible_pet_ids = {item["pet_id"] for item in latest_pet_detections if item.get("pet_id")}
     with pet_assignment_lock:
-        assigned_pets = {value["pet_id"]: value["pet_name"] for value in pet_assignments.values()}
-    for pet_id, pet_name in assigned_pets.items():
+        assigned_pets = {
+            value["pet_id"]: (value["pet_name"], value.get("pet_size", "medio"))
+            for value in pet_assignments.values()
+        }
+    for pet_id, (pet_name, pet_size) in assigned_pets.items():
         if pet_id not in visible_pet_ids:
             continue
         now_monotonic = time.monotonic()
@@ -351,9 +460,9 @@ def check_pet_routine_alerts(now):
             if zone_name not in zones:
                 continue
             if table == "estado_hidratacao":
-                ensure_hydration_monitoring(pet_id, pet_name, now)
+                ensure_hydration_monitoring(pet_id, pet_name, now, pet_size)
             else:
-                ensure_feeding_monitoring(pet_id, pet_name, now)
+                ensure_feeding_monitoring(pet_id, pet_name, now, pet_size)
             with get_db() as conn:
                 state = conn.execute(
                     f"SELECT monitoramento_desde, {interaction_column}, ultimo_aviso FROM {table} WHERE pet_id = ?",
@@ -395,14 +504,21 @@ def update_pet_presence_alerts(detections):
         if state["visible"] and pet_id not in visible_pets and now - state["last_seen"] >= PRESENCE_LOST_AFTER_SECONDS:
             state["visible"] = False
             pet_name = state.get("pet_name", "Seu pet")
-            create_pet_alert("PRESENCA", f"{pet_name} não aparece na câmera há {_format_duration(PRESENCE_LOST_AFTER_SECONDS)}.", pet_id, pet_name)
+            create_pet_alert(
+                "PRESENCA",
+                f"{pet_name} não aparece na câmera há {_format_duration(PRESENCE_LOST_AFTER_SECONDS)}.",
+                pet_id,
+                pet_name,
+            )
 
 
-def update_live_pet_detections(result, frame_shape):
-    global latest_pet_detections
+def update_live_pet_detections(result, frame_shape, raw_frame: np.ndarray | None = None):
+    global latest_pet_detections, latest_track_boxes
     boxes = getattr(result, "boxes", None)
     detections = []
+    current_boxes = {}
     now = datetime.datetime.now().astimezone()
+
     if boxes is not None and boxes.cls is not None and boxes.id is not None:
         frame_height, frame_width = frame_shape[:2]
         zones = {key: normalize_legacy_zone(value) for key, value in load_roi_zones().items()}
@@ -410,41 +526,90 @@ def update_live_pet_detections(result, frame_shape):
         classes = boxes.cls.cpu().tolist()
         confidences = boxes.conf.cpu().tolist()
         track_ids = boxes.id.int().cpu().tolist()
+
+        # Coleta quais pet_ids já estão ativamente vinculados a track_ids visíveis neste frame
+        active_track_set = {int(tid) for tid in track_ids}
+        with pet_assignment_lock:
+            already_used_pet_ids = {
+                v["pet_id"]
+                for tid, v in pet_assignments.items()
+                if tid in active_track_set and v.get("pet_id")
+            }
+
         for box, class_id, confidence, track_id in zip(box_values, classes, confidences, track_ids):
             species = model.names[int(class_id)]
             if species not in ("dog", "cat"):
                 continue
+
+            tid = int(track_id)
+            current_boxes[tid] = [float(v) for v in box[:4]]
             center = get_center(box)
-            interaction = next(("ALIMENTACAO" if kind == "comida" else "HIDRATACAO"
-                                for kind, zone in zones.items()
-                                if point_inside_normalized_zone(center, zone, frame_width, frame_height)), None)
-            with pet_assignment_lock:
-                assignment = pet_assignments.get(int(track_id), {}).copy()
+
+            # Cálculo de deslocamento e atividade em tempo real para a tela Início
+            displacement = 0.0
+            if tid in live_prev_positions:
+                prev_x, prev_y = live_prev_positions[tid]
+                displacement = math.hypot(center[0] - prev_x, center[1] - prev_y)
+            live_prev_positions[tid] = center
+            activity_label = classify_activity(displacement)
+
+            interaction = next(
+                (
+                    "ALIMENTACAO" if kind == "comida" else "HIDRATACAO"
+                    for kind, zone in zones.items()
+                    if point_inside_normalized_zone(center, zone, frame_width, frame_height)
+                ),
+                None,
+            )
+
             expected_species = "cachorro" if species == "dog" else "gato"
-            if assignment and assignment.get("pet_species") != expected_species:
-                assignment = {}
+            with pet_assignment_lock:
+                assignment = pet_assignments.get(tid, {}).copy()
+                if assignment and assignment.get("pet_species") != expected_species:
+                    assignment = {}
+
+                # Re-ID automático via assinatura HSV caso seja um novo track_id sem dono
+                if not assignment and raw_frame is not None:
+                    matched = match_pet_by_visual_signature(raw_frame, box, expected_species, already_used_pet_ids)
+                    if matched:
+                        pet_assignments[tid] = matched
+                        assignment = matched.copy()
+                        already_used_pet_ids.add(matched["pet_id"])
+
             detection = {
-                "track_id": int(track_id),
+                "track_id": tid,
                 "species": species,
                 "confidence": round(float(confidence), 3),
                 "interaction": interaction,
+                "activity": activity_label,
+                "nivel_atividade": activity_label,
+                "displacement_pixels": round(displacement, 2),
                 "pet_id": assignment.get("pet_id", ""),
                 "pet_name": assignment.get("pet_name", ""),
+                "pet_size": assignment.get("pet_size", ""),
             }
             detections.append(detection)
+
             if interaction in ("HIDRATACAO", "ALIMENTACAO") and detection["pet_id"]:
                 sessions = water_interaction_sessions if interaction == "HIDRATACAO" else food_interaction_sessions
-                session = sessions.get(int(track_id))
+                session = sessions.get(tid)
                 if session is None or session["pet_id"] != detection["pet_id"]:
-                    sessions[int(track_id)] = {"pet_id": detection["pet_id"], "pet_name": detection["pet_name"], "started_at": now, "last_seen": now, "recorded": False}
+                    sessions[tid] = {
+                        "pet_id": detection["pet_id"],
+                        "pet_name": detection["pet_name"],
+                        "pet_size": detection.get("pet_size") or "medio",
+                        "started_at": now,
+                        "last_seen": now,
+                        "recorded": False,
+                    }
                 else:
                     session["last_seen"] = now
-                session = sessions[int(track_id)]
+                session = sessions[tid]
                 duration = (now - session["started_at"]).total_seconds()
                 if duration >= 3 and not session["recorded"]:
                     recorder = record_water_interaction if interaction == "HIDRATACAO" else record_food_interaction
                     category_label = "zona de água" if interaction == "HIDRATACAO" else "zona de ração"
-                    recorder(detection["pet_id"], detection["pet_name"], now)
+                    recorder(detection["pet_id"], detection["pet_name"], now, session["pet_size"])
                     create_pet_alert(
                         interaction,
                         f"A câmera registrou {detection['pet_name']} na {category_label}. Isso confirma presença na área, não ingestão.",
@@ -454,6 +619,10 @@ def update_live_pet_detections(result, frame_shape):
                     session["recorded"] = True
 
     active_tracks = {item["track_id"] for item in detections}
+    for old_tid in list(live_prev_positions.keys()):
+        if old_tid not in active_tracks:
+            live_prev_positions.pop(old_tid, None)
+
     for sessions, interaction_name, recorder in (
         (water_interaction_sessions, "HIDRATACAO", record_water_interaction),
         (food_interaction_sessions, "ALIMENTACAO", record_food_interaction),
@@ -465,7 +634,7 @@ def update_live_pet_detections(result, frame_shape):
                 continue
             duration = (session["last_seen"] - session["started_at"]).total_seconds()
             if duration >= 3 and not session["recorded"]:
-                recorder(session["pet_id"], session["pet_name"], now)
+                recorder(session["pet_id"], session["pet_name"], now, session.get("pet_size", "medio"))
                 category_label = "zona de água" if interaction_name == "HIDRATACAO" else "zona de ração"
                 create_pet_alert(
                     interaction_name,
@@ -477,16 +646,23 @@ def update_live_pet_detections(result, frame_shape):
 
     with camera_state_lock:
         latest_pet_detections = detections
+        latest_track_boxes = current_boxes
     update_pet_presence_alerts(detections)
     check_pet_routine_alerts(now)
+
 
 def get_center(box):
     return ((box[0] + box[2]) / 2, (box[1] + box[3]) / 2)
 
+
 def ponto_dentro_da_roi(ponto, roi):
-    """Verifica se o centro do pet está dentro da caixa delimitadora da ROI [x1, y1, x2, y2]."""
     px, py = ponto
     return roi["x1"] <= px <= roi["x2"] and roi["y1"] <= py <= roi["y2"]
+
+
+# ==============================================================================
+# ENDPOINTS DA API
+# ==============================================================================
 
 @app.post("/configurar-rois")
 def configurar_rois(payload: dict = Body(...), user: dict = Depends(require_camera_owner)):
@@ -541,7 +717,8 @@ def obter_deteccoes_ao_vivo(user: dict = Depends(require_camera_owner)):
     with camera_state_lock:
         detections = [item.copy() for item in latest_pet_detections]
         status = camera_status
-    return {"camera": status, "detections": detections}
+        is_yolo_active = yolo_enabled
+    return {"camera": status, "yolo_enabled": is_yolo_active, "detections": detections}
 
 
 @app.post("/detections/assign")
@@ -553,13 +730,21 @@ def associar_deteccao_a_pet(payload: dict = Body(...), user: dict = Depends(requ
     pet_id = str(payload.get("pet_id", "")).strip()[:80]
     pet_name = " ".join(str(payload.get("pet_name", "")).split())[:60]
     pet_species = str(payload.get("pet_species", "")).strip().casefold()
+    pet_size = str(payload.get("pet_size") or payload.get("porte") or "medio").strip().casefold()
+    if pet_size not in ("pequeno", "medio", "médio", "grande"):
+        pet_size = "medio"
+
     with camera_state_lock:
         current_detection = next((item for item in latest_pet_detections if item["track_id"] == track_id), None)
+        current_box = latest_track_boxes.get(track_id)
+        frame_snapshot = latest_raw_frame.copy() if latest_raw_frame is not None else None
+
     if pet_id and current_detection is None:
         raise HTTPException(status_code=409, detail="Essa detecção não está mais ativa. Selecione o animal novamente.")
     expected_species = {"dog": "cachorro", "cat": "gato"}.get(current_detection["species"]) if current_detection else None
     if pet_id and pet_species != expected_species:
         raise HTTPException(status_code=422, detail="Associe a detecção a um pet da mesma espécie.")
+
     old_pet_id = ""
     with pet_assignment_lock:
         previously_assigned = any(value.get("pet_id") == pet_id for value in pet_assignments.values()) if pet_id else False
@@ -573,28 +758,45 @@ def associar_deteccao_a_pet(payload: dict = Body(...), user: dict = Depends(requ
                     pet_assignments.pop(other_track_id, None)
                     water_interaction_sessions.pop(other_track_id, None)
                     food_interaction_sessions.pop(other_track_id, None)
-            pet_assignments[track_id] = {"pet_id": pet_id, "pet_name": pet_name, "pet_species": pet_species}
+            pet_assignments[track_id] = {
+                "pet_id": pet_id,
+                "pet_name": pet_name,
+                "pet_species": pet_species,
+                "pet_size": pet_size,
+            }
+            # Captura e salva a assinatura visual HSV do pet para Re-ID automático futuro
+            if frame_snapshot is not None and current_box is not None:
+                hist = extract_pet_color_signature(frame_snapshot, current_box)
+                if hist is not None:
+                    pet_visual_signatures[pet_id] = {
+                        "pet_name": pet_name,
+                        "pet_species": pet_species,
+                        "pet_size": pet_size,
+                        "hist": hist,
+                    }
+
     if old_pet_id and old_pet_id != pet_id:
         with pet_assignment_lock:
             old_still_assigned = any(value.get("pet_id") == old_pet_id for value in pet_assignments.values())
         if not old_still_assigned:
             pet_presence_states.pop(old_pet_id, None)
+
     if pet_id and pet_name and not previously_assigned:
         now = datetime.datetime.now().astimezone().isoformat(timespec="seconds")
         with get_db() as conn:
             conn.execute(
-                "INSERT INTO estado_hidratacao (pet_id, pet_nome, monitoramento_desde, ultima_interacao_agua, ultimo_aviso) "
-                "VALUES (?, ?, ?, NULL, NULL) ON CONFLICT(pet_id) DO UPDATE SET "
-                "pet_nome = excluded.pet_nome, monitoramento_desde = excluded.monitoramento_desde, "
+                "INSERT INTO estado_hidratacao (pet_id, pet_nome, pet_porte, monitoramento_desde, ultima_interacao_agua, ultimo_aviso) "
+                "VALUES (?, ?, ?, ?, NULL, NULL) ON CONFLICT(pet_id) DO UPDATE SET "
+                "pet_nome = excluded.pet_nome, pet_porte = excluded.pet_porte, monitoramento_desde = excluded.monitoramento_desde, "
                 "ultima_interacao_agua = NULL, ultimo_aviso = NULL",
-                (pet_id, pet_name, now),
+                (pet_id, pet_name, pet_size, now),
             )
             conn.execute(
-                "INSERT INTO estado_alimentacao (pet_id, pet_nome, monitoramento_desde, ultima_interacao_comida, ultimo_aviso) "
-                "VALUES (?, ?, ?, NULL, NULL) ON CONFLICT(pet_id) DO UPDATE SET "
-                "pet_nome = excluded.pet_nome, monitoramento_desde = excluded.monitoramento_desde, "
+                "INSERT INTO estado_alimentacao (pet_id, pet_nome, pet_porte, monitoramento_desde, ultima_interacao_comida, ultimo_aviso) "
+                "VALUES (?, ?, ?, ?, NULL, NULL) ON CONFLICT(pet_id) DO UPDATE SET "
+                "pet_nome = excluded.pet_nome, pet_porte = excluded.pet_porte, monitoramento_desde = excluded.monitoramento_desde, "
                 "ultima_interacao_comida = NULL, ultimo_aviso = NULL",
-                (pet_id, pet_name, now),
+                (pet_id, pet_name, pet_size, now),
             )
         PET_MONITOR_CHECK_AT.pop(pet_id, None)
     elif removed_assignment:
@@ -603,7 +805,9 @@ def associar_deteccao_a_pet(payload: dict = Body(...), user: dict = Depends(requ
             still_assigned = any(value.get("pet_id") == old_pet_id for value in pet_assignments.values())
         if not still_assigned:
             pet_presence_states.pop(old_pet_id, None)
-    return {"track_id": track_id, "pet_id": pet_id, "pet_name": pet_name}
+
+    return {"track_id": track_id, "pet_id": pet_id, "pet_name": pet_name, "pet_size": pet_size, "reid_saved": pet_id in pet_visual_signatures}
+
 
 @app.post("/analisar-frame")
 async def analisar_frame(file: UploadFile = File(...), user: dict = Depends(require_camera_owner)):
@@ -620,12 +824,11 @@ async def analisar_frame(file: UploadFile = File(...), user: dict = Depends(requ
 
     results = model.track(frame, persist=True, classes=[15, 16, 45], conf=0.30, verbose=False)
     if results:
-        update_live_pet_detections(results[0], frame.shape)
+        update_live_pet_detections(results[0], frame.shape, raw_frame=frame)
 
     agora = datetime.datetime.now()
     pets = []
-    
-    # Busca ROIs salvas no banco
+
     rois = {}
     with get_db() as conn:
         cursor = conn.cursor()
@@ -642,59 +845,49 @@ async def analisar_frame(file: UploadFile = File(...), user: dict = Depends(requ
         for box, cls_id, conf, track_id in zip(boxes, clss, confs, track_ids):
             class_name = model.names[int(cls_id)]
 
-            if class_name in ['dog', 'cat']:
+            if class_name in ["dog", "cat"]:
                 history_classes[track_id].append(class_name)
                 if len(history_classes[track_id]) > 30:
                     history_classes[track_id] = history_classes[track_id][-30:]
                 especie = Counter(history_classes[track_id]).most_common(1)[0][0]
 
                 centro_atual = get_center(box)
-                
-                # 1. CÁLCULO DE MOBILIDADE E ATIVIDADE FÍSICA
+
                 deslocamento = 0.0
                 if track_id in posicoes_anteriores:
                     prev_x, prev_y = posicoes_anteriores[track_id]
                     deslocamento = math.hypot(centro_atual[0] - prev_x, centro_atual[1] - prev_y)
                 posicoes_anteriores[track_id] = centro_atual
 
-                # Classifica o estado de atividade pontual
-                if deslocamento < 2.0:
-                    nivel_atividade = "Repouso / Inativo"
-                elif deslocamento < 15.0:
-                    nivel_atividade = "Atividade Moderada"
-                else:
-                    nivel_atividade = "Movimentação Intensa"
+                nivel_atividade = classify_activity(deslocamento)
 
-                # 2. DETECÇÃO DE INTERAÇÃO COM ZONAS DE ALIMENTAÇÃO (ROI)
                 interagindo_tipo = None
                 for tipo_zona, coords_roi in rois.items():
                     if point_inside_normalized_zone(centro_atual, coords_roi, frame.shape[1], frame.shape[0]):
                         interagindo_tipo = "ALIMENTACAO" if tipo_zona == "comida" else "HIDRATACAO"
                         break
 
-                # 3. GERENCIAMENTO DE SESSÃO COM DEBOUNCE (Evita falsos registros picados)
                 if interagindo_tipo:
                     if track_id not in sessoes_interacao:
                         sessoes_interacao[track_id] = {
                             "tipo": interagindo_tipo,
                             "inicio": agora,
-                            "ultima_vista": agora
+                            "ultima_vista": agora,
                         }
                     else:
                         sessoes_interacao[track_id]["ultima_vista"] = agora
                 else:
-                    # Se saiu da zona, verifica se a sessão expirou (mais de 60s longe)
                     if track_id in sessoes_interacao:
                         sessao = sessoes_interacao[track_id]
                         tempo_ausente = (agora - sessao["ultima_vista"]).total_seconds()
                         if tempo_ausente > 60:
                             duracao_total = int((sessao["ultima_vista"] - sessao["inicio"]).total_seconds())
-                            if duracao_total >= 5:  # Considera evento válido apenas se durar mais de 5s
+                            if duracao_total >= 5:
                                 with get_db() as conn:
                                     cursor = conn.cursor()
                                     cursor.execute(
                                         "INSERT INTO registro_eventos (timestamp, pet_id, especie, tipo_evento, duracao_segundos, deslocamento_pixels) VALUES (?, ?, ?, ?, ?, ?)",
-                                        (sessao["inicio"].strftime("%Y-%m-%d %H:%M:%S"), int(track_id), especie, sessao["tipo"], duracao_total, 0.0)
+                                        (sessao["inicio"].strftime("%Y-%m-%d %H:%M:%S"), int(track_id), especie, sessao["tipo"], duracao_total, 0.0),
                                     )
                                     conn.commit()
                             del sessoes_interacao[track_id]
@@ -704,20 +897,20 @@ async def analisar_frame(file: UploadFile = File(...), user: dict = Depends(requ
                     "especie": especie,
                     "nivel_atividade": nivel_atividade,
                     "deslocamento_pixels": round(deslocamento, 2),
-                    "interagindo": interagindo_tipo if interagindo_tipo else "Nenhum"
+                    "interagindo": interagindo_tipo if interagindo_tipo else "Nenhum",
                 })
 
     return {
         "timestamp": agora.strftime("%Y-%m-%d %H:%M:%S"),
         "pets_detectados": pets,
-        "rois_ativas": list(rois.keys())
+        "rois_ativas": list(rois.keys()),
     }
 
 
 @app.get("/health")
 def health():
     """Confirma que a API terminou de carregar o modelo YOLO."""
-    return {"status": "online"}
+    return {"status": "online", "yolo_enabled": yolo_enabled, "camera": camera_status}
 
 
 @app.get("/alertas")
@@ -732,6 +925,73 @@ def listar_alertas(after_id: int = Query(0, ge=0), limit: int = Query(100, ge=1,
     return {"alertas": [dict(row) for row in rows]}
 
 
+@app.post("/admin/reset-demo")
+def reset_demo_data(user: dict = Depends(require_camera_owner)):
+    """Limpa alertas e estados de teste antes da apresentação oficial."""
+    with get_db() as conn:
+        conn.execute("DELETE FROM alertas")
+        conn.execute("DELETE FROM registro_eventos")
+        conn.execute("DELETE FROM estado_hidratacao")
+        conn.execute("DELETE FROM estado_alimentacao")
+    with pet_assignment_lock:
+        pet_assignments.clear()
+        pet_visual_signatures.clear()
+    pet_presence_states.clear()
+    water_interaction_sessions.clear()
+    food_interaction_sessions.clear()
+    PET_MONITOR_CHECK_AT.clear()
+    return {"status": "ok", "message": "Dados de teste limpos com sucesso."}
+
+
+@app.post("/camera/yolo")
+def set_yolo_state(payload: dict = Body(...), user: dict = Depends(require_camera_owner)):
+    """Ativa ou pausa a inferência YOLO mantendo a transmissão de vídeo da câmera ativa."""
+    global yolo_enabled, latest_pet_detections
+    if "enabled" not in payload or not isinstance(payload["enabled"], bool):
+        raise HTTPException(status_code=422, detail="Informe {'enabled': true} ou {'enabled': false}.")
+    yolo_enabled = payload["enabled"]
+    if not yolo_enabled:
+        with camera_state_lock:
+            latest_pet_detections = []
+    return {"yolo_enabled": yolo_enabled}
+
+
+@app.get("/camera/yolo")
+def get_yolo_state(user: dict = Depends(require_camera_owner)):
+    return {"yolo_enabled": yolo_enabled}
+
+
+@app.get("/camera/snapshot")
+def get_camera_snapshot(user: dict = Depends(require_camera_owner)):
+    """Retorna uma foto estática limpa da câmera para servir de fundo no desenho das zonas ROI."""
+    with camera_state_lock:
+        raw = latest_raw_frame.copy() if latest_raw_frame is not None else None
+        fallback_jpeg = latest_camera_jpeg
+
+    if raw is not None:
+        ok, encoded = cv2.imencode(".jpg", raw, [int(cv2.IMWRITE_JPEG_QUALITY), 85])
+        if ok:
+            return Response(
+                content=encoded.tobytes(),
+                media_type="image/jpeg",
+                headers={"Cache-Control": "no-store, max-age=0"},
+            )
+
+    if fallback_jpeg:
+        return Response(
+            content=fallback_jpeg,
+            media_type="image/jpeg",
+            headers={"Cache-Control": "no-store, max-age=0"},
+        )
+
+    placeholder = _placeholder_camera_frame()
+    return Response(
+        content=placeholder,
+        media_type="image/jpeg",
+        headers={"Cache-Control": "no-store, max-age=0"},
+    )
+
+
 @app.post("/camera/session")
 def create_camera_stream_session(user: dict = Depends(require_camera_owner)):
     return {"stream_token": _issue_stream_token(user["sub"]), "expires_in": STREAM_TOKEN_TTL_SECONDS}
@@ -741,23 +1001,24 @@ def create_camera_stream_session(user: dict = Depends(require_camera_owner)):
 def camera_page(stream_token: str = Query(..., min_length=20, max_length=2048)):
     """Página para WebView; a URL usa uma autorização temporária emitida após login Firebase."""
     _verify_stream_owner(stream_token)
-    safe_token = stream_token.replace("&", "&amp;").replace("\"", "&quot;").replace("<", "&lt;").replace(">", "&gt;")
-    html = """
+    safe_token = stream_token.replace("&", "&amp;").replace('"', "&quot;").replace("<", "&lt;").replace(">", "&gt;")
+    status_label = "análise YOLO ativa" if yolo_enabled else "análise YOLO pausada"
+    html = f"""
     <!doctype html>
     <html lang="pt-BR">
       <head>
         <meta name="viewport" content="width=device-width, initial-scale=1">
         <meta charset="utf-8">
         <style>
-          * { box-sizing: border-box; }
-          body { margin: 0; background: #111116; color: #fff;
-                 font: 14px Arial, sans-serif; }
-          .frame { position: relative; width: 100%; aspect-ratio: 4 / 3;
-                   background: #24242c; overflow: hidden; }
-          img { width: 100%; height: 100%; object-fit: contain; }
-          .status { padding: 10px 12px; color: #d2d2dc; }
-          .error { color: #ff8a80; }
-          .dot { color: #49dc8a; }
+          * {{ box-sizing: border-box; }}
+          body {{ margin: 0; background: #111116; color: #fff;
+                 font: 14px Arial, sans-serif; }}
+          .frame {{ position: relative; width: 100%; aspect-ratio: 4 / 3;
+                   background: #24242c; overflow: hidden; }}
+          img {{ width: 100%; height: 100%; object-fit: contain; }}
+          .status {{ padding: 10px 12px; color: #d2d2dc; }}
+          .error {{ color: #ff8a80; }}
+          .dot {{ color: #49dc8a; }}
         </style>
       </head>
       <body>
@@ -765,7 +1026,7 @@ def camera_page(stream_token: str = Query(..., min_length=20, max_length=2048)):
           <img src="/video_feed?stream_token=__STREAM_TOKEN__" alt="Transmissão da câmera"
                onerror="document.getElementById('status').textContent='Não foi possível receber o vídeo. Verifique a câmera e a API.'; document.getElementById('status').className='status error'">
         </div>
-        <div id="status" class="status"><span class="dot">●</span> Câmera do notebook · análise YOLO ativa</div>
+        <div id="status" class="status"><span class="dot">●</span> Câmera do notebook · {status_label}</div>
       </body>
     </html>
     """
@@ -831,6 +1092,7 @@ def stop_camera_discovery():
     discovery_info = None
     discovery_ready = False
 
+
 def _placeholder_camera_frame():
     frame = np.zeros((480, 640, 3), dtype=np.uint8)
     cv2.putText(frame, "Camera indisponivel", (150, 230), cv2.FONT_HERSHEY_SIMPLEX, 1, (210, 210, 220), 2)
@@ -839,7 +1101,7 @@ def _placeholder_camera_frame():
 
 
 def _camera_capture_worker():
-    global latest_camera_jpeg, camera_status
+    global latest_camera_jpeg, latest_raw_frame, camera_status
     backend = cv2.CAP_DSHOW if os.name == "nt" else cv2.CAP_ANY
     while not camera_stop_event.is_set():
         capture = cv2.VideoCapture(0, backend)
@@ -848,6 +1110,7 @@ def _camera_capture_worker():
             with camera_state_lock:
                 camera_status = "aguardando_camera"
                 latest_camera_jpeg = _placeholder_camera_frame()
+                latest_raw_frame = None
             camera_stop_event.wait(3.0)
             continue
         capture.set(cv2.CAP_PROP_FRAME_WIDTH, 640)
@@ -861,24 +1124,28 @@ def _camera_capture_worker():
                     with camera_state_lock:
                         camera_status = "reconectando"
                     break
-                try:
-                    with yolo_inference_lock:
-                        results = model.track(frame, persist=True, classes=[15, 16, 45], conf=0.30, verbose=False)
-                    if results:
-                        update_live_pet_detections(results[0], frame.shape)
-                        frame = results[0].plot()
-                except Exception:
-                    pass
+                raw_copy = frame.copy()
+                if yolo_enabled:
+                    try:
+                        with yolo_inference_lock:
+                            results = model.track(frame, persist=True, classes=[15, 16, 45], conf=0.30, verbose=False)
+                        if results:
+                            update_live_pet_detections(results[0], frame.shape, raw_frame=raw_copy)
+                            frame = results[0].plot()
+                    except Exception:
+                        pass
                 encoded_ok, encoded = cv2.imencode(".jpg", frame, [int(cv2.IMWRITE_JPEG_QUALITY), 75])
                 if encoded_ok:
                     with camera_state_lock:
                         latest_camera_jpeg = encoded.tobytes()
+                        latest_raw_frame = raw_copy
                 camera_stop_event.wait(0.04)
         finally:
             capture.release()
     with camera_state_lock:
         camera_status = "desconectada"
         latest_camera_jpeg = None
+        latest_raw_frame = None
 
 
 def start_camera_capture():
@@ -888,7 +1155,6 @@ def start_camera_capture():
             return
         if camera_thread is not None and camera_thread.is_alive():
             camera_thread.join(timeout=5)
-        # O tempo sem registro começa novamente nesta sessão contínua da câmera.
         with get_db() as conn:
             conn.execute(
                 "UPDATE estado_hidratacao SET monitoramento_desde = ?, ultima_interacao_agua = NULL, ultimo_aviso = NULL",
@@ -902,6 +1168,7 @@ def start_camera_capture():
         pet_presence_states.clear()
         food_interaction_sessions.clear()
         water_interaction_sessions.clear()
+        live_prev_positions.clear()
         camera_stop_event.clear()
         with camera_state_lock:
             camera_status = "iniciando"
@@ -910,7 +1177,7 @@ def start_camera_capture():
 
 
 def stop_camera_capture():
-    global camera_thread, camera_status, latest_camera_jpeg
+    global camera_thread, camera_status, latest_camera_jpeg, latest_raw_frame
     with camera_control_lock:
         camera_stop_event.set()
         if camera_thread is not None and camera_thread.is_alive():
@@ -919,13 +1186,16 @@ def stop_camera_capture():
         with camera_state_lock:
             camera_status = "desconectada"
             latest_camera_jpeg = None
+            latest_raw_frame = None
         latest_pet_detections.clear()
+        latest_track_boxes.clear()
     with pet_assignment_lock:
         pet_assignments.clear()
     water_interaction_sessions.clear()
     food_interaction_sessions.clear()
     PET_MONITOR_CHECK_AT.clear()
     pet_presence_states.clear()
+    live_prev_positions.clear()
 
 
 @app.post("/camera/connect")
@@ -957,5 +1227,5 @@ def video_feed(stream_token: str = Query(..., min_length=20, max_length=2048)):
     return StreamingResponse(
         generate_camera_frames(),
         media_type="multipart/x-mixed-replace; boundary=frame",
-        headers={"Cache-Control": "no-cache, no-store, must-revalidate", "Referrer-Policy": "no-referrer"}
+        headers={"Cache-Control": "no-cache, no-store, must-revalidate", "Referrer-Policy": "no-referrer"},
     )
