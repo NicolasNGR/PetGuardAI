@@ -1147,7 +1147,7 @@ def camera_page(stream_token: str = Query(..., min_length=20, max_length=2048)):
           <img src="/video_feed?stream_token=__STREAM_TOKEN__" alt="Transmissão da câmera"
                onerror="document.getElementById('status').textContent='Não foi possível receber o vídeo. Verifique a câmera e a API.'; document.getElementById('status').className='status error'">
         </div>
-        <div id="status" class="status"><span class="dot">●</span> Câmera do notebook · {status_label}</div>
+        <div id="status" class="status"><span class="dot">●</span> Câmera de monitoramento · {status_label}</div>
       </body>
     </html>
     """
