@@ -30,6 +30,7 @@ import kotlinx.coroutines.isActive
 import java.time.Instant
 import java.time.LocalDate
 import java.time.ZoneId
+import java.text.Normalizer
 import kotlin.math.pow
 import kotlin.math.roundToInt
 
@@ -390,14 +391,21 @@ class PetGuardViewModel(
 
     private fun autoAssignUnambiguousDetections(camera: CameraDevice, detections: List<LivePetDetection>) {
         if (pets.isEmpty()) return
-        detections.asSequence()
-            .filter { it.petId.isBlank() }
-            .forEach { detection ->
-                val speciesName = if (detection.species == "dog") "cachorro" else "gato"
-                val pet = pets.filter { it.species.equals(speciesName, ignoreCase = true) }.singleOrNull()
-                    ?: return@forEach
+        listOf("dog" to "cachorro", "cat" to "gato").forEach { (species, speciesName) ->
+            val visibleOfSpecies = detections.filter { it.species.equals(species, ignoreCase = true) }
+            if (visibleOfSpecies.size != 1) return@forEach
+            val detection = visibleOfSpecies.single()
+            if (detection.petId.isNotBlank()) return@forEach
+
+            val pet = pets.filter { it.species.equals(speciesName, ignoreCase = true) }.singleOrNull()
+                ?: return@forEach
+            val petAlreadyAssignedToActiveTrack = detections.any {
+                it.trackId != detection.trackId && it.petId == pet.id
+            }
+            if (!petAlreadyAssignedToActiveTrack) {
                 requestDetectionAssignment(camera, detection, pet, notifyUser = false)
             }
+        }
     }
 
     private fun requestDetectionAssignment(
@@ -720,9 +728,38 @@ class PetGuardViewModel(
         return detection?.activity?.takeIf(String::isNotBlank) ?: "Aguardando detecção"
     }
 
+    private fun normalizedMessage(value: String): String = Normalizer
+        .normalize(value.lowercase(), Normalizer.Form.NFD)
+        .replace(Regex("\\p{Mn}+"), "")
+
+    private fun isPositiveRoutineEvent(message: String): Boolean {
+        val normalized = normalizedMessage(message)
+        return "registrou" in normalized && "nao registrou" !in normalized
+    }
+
+    private fun isMissedRoutineEvent(message: String): Boolean =
+        "nao registrou" in normalizedMessage(message)
+
+    private fun isPresenceAbsence(message: String): Boolean =
+        "nao aparece na camera" in normalizedMessage(message)
+
+    private fun isPresenceReturn(message: String): Boolean =
+        "voltou a aparecer na camera" in normalizedMessage(message)
+
+    fun latestHydrationEvent(): PetEvent? = events
+        .filter { it.petId == selectedPetId && it.category == EventCategory.HIDRATACAO }
+        .maxByOrNull { it.date + it.timeLabel }
+
     fun latestFeedingEvent(): PetEvent? = events
         .filter { it.petId == selectedPetId && it.category == EventCategory.ALIMENTACAO }
         .maxByOrNull { it.date + it.timeLabel }
+
+    fun routineStatus(event: PetEvent?): Pair<String, Boolean> = when {
+        event == null -> "Sem alertas" to false
+        isMissedRoutineEvent(event.detail) -> "Atenção" to true
+        isPositiveRoutineEvent(event.detail) -> "Visitou · ${event.timeLabel}" to false
+        else -> "Sem alertas" to false
+    }
 
     fun loadDailyGoals(pet: PetProfile, cameraUrl: String?) {
         if (pet.id.isBlank()) { dailyGoals = null; return }
@@ -799,25 +836,49 @@ class PetGuardViewModel(
     fun latestHomeAlert(): HomeAlert? {
         if (selectedPetId.isBlank()) return null
         val fromEvents = events.asSequence()
-            .filter { it.petId == selectedPetId && it.category in setOf(EventCategory.ATTENTION, EventCategory.HIDRATACAO, EventCategory.ALIMENTACAO) }
+            .filter { event ->
+                event.petId == selectedPetId && when (event.category) {
+                    EventCategory.HIDRATACAO, EventCategory.ALIMENTACAO -> isMissedRoutineEvent(event.detail)
+                    EventCategory.PRESENCA -> isPresenceAbsence(event.detail)
+                    EventCategory.ATTENTION -> !isPositiveRoutineEvent(event.detail)
+                    else -> false
+                }
+            }
             .map { event ->
                 val label = when (event.category) {
                     EventCategory.HIDRATACAO -> "HIDRATAÇÃO"
                     EventCategory.ALIMENTACAO -> "ALIMENTAÇÃO"
+                    EventCategory.PRESENCA -> "PRESENÇA"
                     else -> "ATENÇÃO NA ROTINA"
                 }
                 HomeAlert(event.id, label, "${event.title}\n${event.detail}", event.timeLabel, "${event.date}T${event.timeLabel}")
             }
         val fromCamera = cameraAlerts.asSequence()
-            .filter { it.petId == selectedPetId && (it.category.equals("HIDRATACAO", true) || it.category.equals("ALIMENTACAO", true) || it.category.equals("ATTENTION", true) || it.priority.equals("atencao", true)) }
+            .filter { alert ->
+                alert.petId == selectedPetId && when (alert.category.uppercase()) {
+                    "HIDRATACAO", "ALIMENTACAO" -> isMissedRoutineEvent(alert.message)
+                    "PRESENCA" -> isPresenceAbsence(alert.message)
+                    "ATTENTION" -> !isPositiveRoutineEvent(alert.message)
+                    else -> alert.priority.equals("atencao", true) && !isPositiveRoutineEvent(alert.message)
+                }
+            }
             .map { alert ->
                 val category = alert.category.uppercase()
-                val label = when (category) { "HIDRATACAO" -> "HIDRATAÇÃO"; "ALIMENTACAO" -> "ALIMENTAÇÃO"; else -> "ATENÇÃO NA ROTINA" }
+                val label = when (category) { "HIDRATACAO" -> "HIDRATAÇÃO"; "ALIMENTACAO" -> "ALIMENTAÇÃO"; "PRESENCA" -> "PRESENÇA"; else -> "ATENÇÃO NA ROTINA" }
                 val timestamp = alert.timestamp
                 val time = timestamp.substringAfter('T').takeIf { it != timestamp }?.take(5) ?: timestamp.substringAfter(' ').take(5)
                 HomeAlert("api-alert-${alert.id}", label, alert.message, time.ifBlank { "agora" }, timestamp)
             }
-        return (fromEvents + fromCamera).filterNot { it.id in dismissedHomeAlertIds }.maxByOrNull { it.sortKey }
+        val candidateAlerts = fromEvents + fromCamera
+        val latestReturnKey = (events.asSequence()
+            .filter { it.petId == selectedPetId && it.category == EventCategory.PRESENCA && isPresenceReturn(it.detail) }
+            .map { "${it.date}T${it.timeLabel}" } + cameraAlerts.asSequence()
+            .filter { it.petId == selectedPetId && it.category.equals("PRESENCA", true) && isPresenceReturn(it.message) }
+            .map { it.timestamp }).maxOrNull()
+        return candidateAlerts
+            .filterNot { it.id in dismissedHomeAlertIds }
+            .filterNot { it.detail.let(::isPresenceAbsence) && latestReturnKey != null && latestReturnKey >= it.sortKey }
+            .maxByOrNull { it.sortKey }
     }
 
     fun dismissHomeAlert(id: String) { dismissedHomeAlertIds = dismissedHomeAlertIds + id }

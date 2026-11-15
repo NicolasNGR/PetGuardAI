@@ -130,8 +130,9 @@ fun HomeScreen(vm: PetGuardViewModel, onConnectCamera: () -> Unit = { vm.navigat
             Spacer(Modifier.height(14.dp))
             PetStatusPill(Icons.Default.SmartToy, "Atividade", if (vm.yoloEnabled) vm.activityForFocusedPet() else "Desativada", signals.info)
             Spacer(Modifier.height(8.dp))
-            val hydration = vm.eventsForSelectedPet().firstOrNull { it.category == EventCategory.HIDRATACAO || it.category == EventCategory.ATTENTION }
-            PetStatusPill(Icons.Default.LocalDrink, "Hidratação", if (hydration == null) "Sem alertas" else "Atenção", if (hydration == null) signals.healthy else signals.attention)
+            val hydrationStatus = vm.routineStatus(vm.latestHydrationEvent())
+            PetStatusPill(Icons.Default.LocalDrink, "Hidratação", hydrationStatus.first,
+                if (hydrationStatus.second) signals.attention else signals.healthy)
             Text(
                 if (focusedPet.pesoKg != null) "Meta diária: ~${goals.hydrationMlDaily} ml (baseado em ${formatKg(goals.referenceWeightKg)} kg)"
                 else "Meta diária: ~${goals.hydrationMlDaily} ml (estimativa porte $sizeLabel)",
@@ -139,7 +140,9 @@ fun HomeScreen(vm: PetGuardViewModel, onConnectCamera: () -> Unit = { vm.navigat
             )
             Spacer(Modifier.height(8.dp))
             val feeding = vm.latestFeedingEvent()
-            PetStatusPill(Icons.Default.Restaurant, "Alimentação", feeding?.timeLabel ?: "Sem alertas", if (feeding == null) signals.healthy else signals.info)
+            val feedingStatus = vm.routineStatus(feeding)
+            PetStatusPill(Icons.Default.Restaurant, "Alimentação", feedingStatus.first,
+                if (feedingStatus.second) signals.attention else if (feeding != null) signals.info else signals.healthy)
             Text("Meta diária: ~${goals.foodGramsDaily} g de ração", Modifier.padding(start = 12.dp, top = 5.dp),
                 color = MaterialTheme.colorScheme.onSurface.copy(alpha = .68f), fontSize = 11.sp)
             val careTip = when (focusedPet.porte.lowercase()) {
