@@ -76,7 +76,7 @@ fun CamerasScreen(vm: PetGuardViewModel) {
                     Icon(Icons.Default.CameraAlt, null, tint = MaterialTheme.colorScheme.primary, modifier = Modifier.size(48.dp))
                     Text(if (selectedCamera == null) "Prévia da câmera" else selectedCamera.name,
                         Modifier.padding(top = 10.dp), color = MaterialTheme.colorScheme.onSurface, fontSize = 17.sp)
-                    Text(if (selectedCamera == null) "Adicione a webcam do notebook para iniciar a visualização." else "Toque em Conectar para abrir a transmissão do notebook.",
+                    Text(if (selectedCamera == null) "Adicione uma câmera para iniciar a visualização." else "Toque em Conectar para abrir a transmissão ao vivo.",
                         Modifier.padding(top = 6.dp), color = MaterialTheme.colorScheme.onSurface.copy(alpha = .8f), fontSize = 12.sp)
                     if (vm.isLoading) { Spacer(Modifier.height(12.dp)); CircularProgressIndicator(Modifier.size(24.dp)) }
                 }
@@ -111,7 +111,7 @@ fun CamerasScreen(vm: PetGuardViewModel) {
                         Icon(Icons.Default.CameraAlt, null, tint = MaterialTheme.colorScheme.primary)
                         Column(Modifier.weight(1f).padding(horizontal = 12.dp)) {
                             Text(camera.name, color = MaterialTheme.colorScheme.onSurface, fontSize = 13.sp)
-                            Text(if (camera.url.isBlank()) "Notebook / webcam" else camera.url,
+                            Text(if (camera.url.isBlank()) "Câmera de monitoramento" else camera.url,
                                 color = MaterialTheme.colorScheme.onSurface.copy(alpha = .7f), fontSize = 10.sp, maxLines = 1)
                         }
                         TextButton(onClick = { vm.setCameraConnected(camera.id, !camera.connected) }) {
@@ -330,7 +330,7 @@ private fun CameraDiscoveryDialog(
         delay(15_000)
         if (scanning && found.isEmpty()) {
             scanning = false
-            scanError = "Nenhum notebook encontrado. Verifique se a API está aberta e tente buscar novamente."
+            scanError = "Nenhuma câmera de monitoramento encontrada. Verifique se o serviço está ativo e tente buscar novamente."
         }
     }
 
@@ -355,7 +355,7 @@ private fun CameraDiscoveryDialog(
                         val host = info.host?.hostAddress ?: return
                         val address = if (host.contains(':')) "[$host]" else host
                         val camera = DiscoveredCamera(
-                            name = info.serviceName.substringBefore("._petguard-camera").ifBlank { "Notebook PetGuard" },
+                            name = info.serviceName.substringBefore("._petguard-camera").ifBlank { "Câmera PetGuard" },
                             url = "http://$address:${info.port}/camera"
                         )
                         mainHandler.post {
@@ -392,7 +392,7 @@ private fun CameraDiscoveryDialog(
         title = { Text("Adicionar câmera") },
         text = {
             Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
-                Text("Procurando notebooks PetGuard no mesmo Wi-Fi…", style = MaterialTheme.typography.bodyMedium)
+                Text("Procurando câmeras PetGuard na mesma rede Wi-Fi…", style = MaterialTheme.typography.bodyMedium)
                 if (scanning) LinearProgressIndicator(Modifier.fillMaxWidth())
                 scanError?.let { Text(it, color = MaterialTheme.colorScheme.error, style = MaterialTheme.typography.bodySmall) }
                 if (found.isEmpty() && !scanning) {
@@ -411,7 +411,7 @@ private fun CameraDiscoveryDialog(
                             Icon(Icons.Default.CameraAlt, null, tint = MaterialTheme.colorScheme.onSecondaryContainer)
                             Column(Modifier.weight(1f).padding(start = 12.dp)) {
                                 Text(camera.name, color = MaterialTheme.colorScheme.onSecondaryContainer)
-                                Text("Câmera do notebook", color = MaterialTheme.colorScheme.onSecondaryContainer, style = MaterialTheme.typography.bodySmall)
+                                Text("Câmera de monitoramento", color = MaterialTheme.colorScheme.onSecondaryContainer, style = MaterialTheme.typography.bodySmall)
                             }
                             Text("Conectar", color = MaterialTheme.colorScheme.primary, style = MaterialTheme.typography.labelLarge)
                         }
@@ -443,7 +443,7 @@ private fun CameraSettingsDialog(
         title = { Text("Configurações das câmeras") },
         text = {
             if (cameras.isEmpty()) {
-                Text("Nenhum notebook salvo. Adicione uma câmera para começar.")
+                Text("Nenhuma câmera salva. Adicione uma câmera para começar.")
             } else {
                 Column(
                     Modifier.fillMaxWidth().heightIn(max = 440.dp).verticalScroll(rememberScrollState()),
@@ -513,7 +513,7 @@ private fun CameraSettingsDialog(
         AlertDialog(
             onDismissRequest = { cameraToForget = null },
             title = { Text("Esquecer ${camera.name}?") },
-            text = { Text("A câmera será removida da lista salva. Se o notebook estiver acessível, o monitoramento também será desconectado.") },
+            text = { Text("A câmera será removida da lista salva. Se estiver acessível, o monitoramento também será desconectado.") },
             confirmButton = {
                 TextButton(onClick = { onForget(camera.id); cameraToForget = null }) {
                     Text("Esquecer", color = MaterialTheme.colorScheme.error)
@@ -534,7 +534,7 @@ private fun AddCameraDialog(onDismiss: () -> Unit, onSave: (String, String) -> U
             Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
                 OutlinedTextField(value = name, onValueChange = { name = it.take(40) }, label = { Text("Nome do dispositivo") }, singleLine = true)
                 OutlinedTextField(value = url, onValueChange = { url = it.take(200) }, label = { Text("Endereço da câmera") }, singleLine = true)
-                Text("Informe o endereço local anunciado pela API do notebook. Celular e notebook precisam estar na mesma rede.", style = MaterialTheme.typography.bodySmall)
+                Text("Informe o endereço local anunciado pelo serviço da câmera. O celular e a câmera precisam estar na mesma rede.", style = MaterialTheme.typography.bodySmall)
             }
         },
         confirmButton = { TextButton(onClick = { onSave(name, url) }) { Text("Salvar") } },
@@ -574,7 +574,7 @@ fun CameraStreamPreview(url: String, modifier: Modifier = Modifier) {
                         ) {
                             if (request.isForMainFrame) {
                                 loading = false
-                                error = "Não foi possível acessar a câmera. Confira se a API está rodando e se celular e notebook estão no mesmo Wi-Fi."
+                                error = "Não foi possível acessar a câmera. Confira se o serviço está ativo e se o celular está na mesma rede Wi-Fi."
                             }
                         }
                     }
@@ -628,7 +628,7 @@ fun CameraPrivacyGate(modifier: Modifier = Modifier, onAccepted: () -> Unit) {
     }
     if (showQuestion) AlertDialog(
         onDismissRequest = { showQuestion = false },
-        title = { Text("Tudo bem usar a câmera do notebook para acompanhar seu pet?") },
+        title = { Text("Tudo bem usar a câmera de monitoramento para acompanhar seu pet?") },
         confirmButton = { TextButton(onClick = { showQuestion = false; onAccepted() }) { Text("Sim") } },
         dismissButton = { TextButton(onClick = { showQuestion = false }) { Text("Não") } }
     )

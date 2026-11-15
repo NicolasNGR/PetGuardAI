@@ -527,7 +527,7 @@ class PetGuardViewModel(
     }
 
     fun addDiscoveredCamera(name: String, url: String) {
-        val safeName = name.trim().filter { !it.isISOControl() }.take(40).ifBlank { "Notebook PetGuard" }
+        val safeName = name.trim().filter { !it.isISOControl() }.take(40).ifBlank { "Câmera PetGuard" }
         val parsedUri = runCatching { Uri.parse(url.trim()) }.getOrNull()
         if (parsedUri?.scheme != "http" || parsedUri.host.isNullOrBlank() || parsedUri.userInfo != null) {
             actionMessage = "O endereço encontrado para a câmera é inválido."
@@ -543,7 +543,7 @@ class PetGuardViewModel(
                 is RepositoryResult.Success -> {
                     val camera = addResult.value.firstOrNull { it.url.equals(url.trim(), ignoreCase = true) }
                     if (camera == null) {
-                        actionMessage = "Não foi possível adicionar o notebook encontrado."
+                        actionMessage = "Não foi possível adicionar a câmera encontrada."
                         return@launch
                     }
                     when (val connected = safely { repository.setCameraConnected(camera.id, true) }) {
@@ -551,7 +551,7 @@ class PetGuardViewModel(
                             cameras = connected.value
                             cameraPrivacyAccepted = false
                             cameraStreamUrl = null
-                            actionMessage = "Notebook encontrado. Confirme para iniciar a câmera."
+                            actionMessage = "Câmera encontrada. Confirme para iniciar o monitoramento."
                         }
                         is RepositoryResult.Failure -> actionMessage = connected.message
                     }
@@ -582,7 +582,7 @@ class PetGuardViewModel(
                             false
                         }
                         actionMessage = if (apiAvailable) "Câmera desconectada." else
-                            "Câmera desconectada no app; não foi possível confirmar no notebook."
+                            "Câmera desconectada no app; não foi possível confirmar na câmera de monitoramento."
                     }
                 }
                 is RepositoryResult.Failure -> actionMessage = result.message
@@ -631,7 +631,7 @@ class PetGuardViewModel(
                     actionMessage = if (stoppedOnNotebook) {
                         "${camera.name} foi removida das câmeras salvas."
                     } else {
-                        "${camera.name} foi removida. Não foi possível avisar o notebook para parar a câmera."
+                        "${camera.name} foi removida. Não foi possível avisar a câmera de monitoramento para parar a captura."
                     }
                 }
                 is RepositoryResult.Failure -> actionMessage = result.message
@@ -773,7 +773,7 @@ class PetGuardViewModel(
             return
         }
         viewModelScope.launch {
-            actionMessage = "Conectando à câmera do notebook…"
+            actionMessage = "Conectando à câmera de monitoramento…"
             try {
                 val authorizedStreamUrl = PetGuardAlertsApi.createCameraStreamUrl(camera.url)
                 PetGuardAlertsApi.setCameraConnected(camera.url, true)
@@ -792,7 +792,7 @@ class PetGuardViewModel(
             } catch (_: Exception) {
                 cameraPrivacyAccepted = false
                 cameraStreamUrl = null
-                actionMessage = "Não foi possível iniciar a câmera. Confira se a API do notebook está aberta e tente novamente."
+                actionMessage = "Não foi possível iniciar a câmera. Confira se o serviço de monitoramento está ativo e tente novamente."
             }
         }
     }

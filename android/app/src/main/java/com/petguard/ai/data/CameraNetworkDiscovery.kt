@@ -68,7 +68,7 @@ object CameraNetworkDiscovery {
             // /health intentionally exposes status, YOLO state and camera state, not model metadata.
             if (health.optString("status") != "online") return null
             val cameraUrl = Uri.Builder().scheme("http").encodedAuthority("$host:8001").path("/camera").build().toString()
-            DiscoveredPetGuardCamera("Notebook PetGuard", cameraUrl)
+            DiscoveredPetGuardCamera("Câmera PetGuard", cameraUrl)
         } catch (_: Exception) {
             null
         } finally {
