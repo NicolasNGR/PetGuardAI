@@ -78,6 +78,7 @@ camera_stop_event.set()
 camera_thread = None
 latest_camera_jpeg = None
 latest_raw_frame = None  # Frame limpo sem bounding boxes para snapshot de ROI e Re-ID
+latest_annotated_frame = None
 camera_status = "desconectada"
 yolo_enabled = True
 
@@ -87,6 +88,9 @@ discovery_ready = False
 
 latest_pet_detections = []
 latest_track_boxes = {}       # {track_id: [x1, y1, x2, y2]}
+track_species_votes = defaultdict(Counter)
+track_species_locks = {}
+track_species_lock = threading.Lock()
 pet_assignments = {}          # {track_id: {"pet_id": ..., "pet_name": ..., "pet_species": ..., "pet_size": ...}}
 pet_visual_signatures = {}    # {pet_id: {"pet_name": ..., "pet_species": ..., "pet_size": ..., "hist": np.ndarray}}
 
@@ -539,6 +543,39 @@ def update_pet_presence_alerts(detections):
             )
 
 
+def stabilize_track_species(track_id: int, candidate: str) -> str:
+    """Vote per track and permanently lock dog/cat after three matching detections."""
+    with track_species_lock:
+        locked = track_species_locks.get(track_id)
+        if locked:
+            return locked
+        votes = track_species_votes[track_id]
+        votes[candidate] += 1
+        if votes[candidate] >= 3:
+            track_species_locks[track_id] = candidate
+            return candidate
+        best_count = max(votes.values())
+        leaders = [species for species, count in votes.items() if count == best_count]
+        return candidate if candidate in leaders else leaders[0]
+
+
+def draw_detection_labels(frame: np.ndarray, overlay_items: list[dict]) -> np.ndarray:
+    """Draw stable species/pet labels over the latest tracked boxes."""
+    for item in overlay_items:
+        x1, y1, x2, y2 = (int(round(value)) for value in item["box"])
+        color = (40, 190, 90) if item.get("pet_name") else (0, 170, 220)
+        cv2.rectangle(frame, (x1, y1), (x2, y2), color, 2, cv2.LINE_AA)
+        label_name = item.get("pet_name") or ("Cachorro" if item["species"] == "dog" else "Gato")
+        confidence = int(round(float(item.get("confidence", 0.0)) * 100))
+        label = f"{label_name} {confidence}%"
+        (text_width, text_height), baseline = cv2.getTextSize(label, cv2.FONT_HERSHEY_SIMPLEX, 0.55, 2)
+        label_top = max(0, y1 - text_height - baseline - 6)
+        cv2.rectangle(frame, (x1, label_top), (x1 + text_width + 8, label_top + text_height + baseline + 6), color, -1)
+        cv2.putText(frame, label, (x1 + 4, label_top + text_height + 2), cv2.FONT_HERSHEY_SIMPLEX,
+                    0.55, (255, 255, 255), 2, cv2.LINE_AA)
+    return frame
+
+
 def update_live_pet_detections(result, frame_shape, raw_frame: np.ndarray | None = None):
     global latest_pet_detections, latest_track_boxes
     boxes = getattr(result, "boxes", None)
@@ -564,11 +601,12 @@ def update_live_pet_detections(result, frame_shape, raw_frame: np.ndarray | None
             }
 
         for box, class_id, confidence, track_id in zip(box_values, classes, confidences, track_ids):
-            species = model.names[int(class_id)]
-            if species not in ("dog", "cat"):
+            detected_species = model.names[int(class_id)]
+            if detected_species not in ("dog", "cat"):
                 continue
 
             tid = int(track_id)
+            species = stabilize_track_species(tid, detected_species)
             current_boxes[tid] = [float(v) for v in box[:4]]
             center = get_center(box)
 
@@ -678,6 +716,11 @@ def update_live_pet_detections(result, frame_shape, raw_frame: np.ndarray | None
         latest_track_boxes = current_boxes
     update_pet_presence_alerts(detections)
     check_pet_routine_alerts(now)
+    return [
+        {"box": current_boxes[item["track_id"]], "species": item["species"],
+         "pet_name": item["pet_name"], "confidence": item["confidence"]}
+        for item in detections if item["track_id"] in current_boxes
+    ]
 
 
 def get_center(box):
@@ -900,7 +943,7 @@ async def analisar_frame(file: UploadFile = File(...), user: dict = Depends(requ
     if frame is None:
         raise HTTPException(status_code=400, detail="Imagem inválida.")
 
-    results = model.track(frame, persist=True, classes=[15, 16, 45], conf=0.30, verbose=False)
+    results = model.track(frame, persist=True, classes=[15, 16, 45], conf=0.38, verbose=False)
     if results:
         update_live_pet_detections(results[0], frame.shape, raw_frame=frame)
 
@@ -1041,13 +1084,13 @@ def get_yolo_state(user: dict = Depends(require_camera_owner)):
 
 @app.get("/camera/snapshot")
 def get_camera_snapshot(user: dict = Depends(require_camera_owner)):
-    """Retorna uma foto estática limpa da câmera para servir de fundo no desenho das zonas ROI."""
+    """Retorna o frame atual do stream, incluindo os rótulos das detecções ativas."""
     with camera_state_lock:
-        raw = latest_raw_frame.copy() if latest_raw_frame is not None else None
+        annotated = latest_annotated_frame.copy() if latest_annotated_frame is not None else None
         fallback_jpeg = latest_camera_jpeg
 
-    if raw is not None:
-        ok, encoded = cv2.imencode(".jpg", raw, [int(cv2.IMWRITE_JPEG_QUALITY), 85])
+    if annotated is not None:
+        ok, encoded = cv2.imencode(".jpg", annotated, [int(cv2.IMWRITE_JPEG_QUALITY), 70])
         if ok:
             return Response(
                 content=encoded.tobytes(),
@@ -1179,8 +1222,10 @@ def _placeholder_camera_frame():
 
 
 def _camera_capture_worker():
-    global latest_camera_jpeg, latest_raw_frame, camera_status
+    global latest_camera_jpeg, latest_raw_frame, latest_annotated_frame, camera_status
     backend = cv2.CAP_DSHOW if os.name == "nt" else cv2.CAP_ANY
+    frame_index = 0
+    last_overlay_items = []
     while not camera_stop_event.is_set():
         capture = cv2.VideoCapture(0, backend)
         if not capture.isOpened():
@@ -1189,6 +1234,7 @@ def _camera_capture_worker():
                 camera_status = "aguardando_camera"
                 latest_camera_jpeg = _placeholder_camera_frame()
                 latest_raw_frame = None
+                latest_annotated_frame = None
             camera_stop_event.wait(3.0)
             continue
         capture.set(cv2.CAP_PROP_FRAME_WIDTH, 640)
@@ -1204,19 +1250,30 @@ def _camera_capture_worker():
                     break
                 raw_copy = frame.copy()
                 if yolo_enabled:
-                    try:
-                        with yolo_inference_lock:
-                            results = model.track(frame, persist=True, classes=[15, 16, 45], conf=0.30, verbose=False)
-                        if results:
-                            update_live_pet_detections(results[0], frame.shape, raw_frame=raw_copy)
-                            frame = results[0].plot()
-                    except Exception:
-                        pass
-                encoded_ok, encoded = cv2.imencode(".jpg", frame, [int(cv2.IMWRITE_JPEG_QUALITY), 75])
+                    if frame_index % 3 == 0:
+                        try:
+                            with yolo_inference_lock:
+                                results = model.track(frame, persist=True, classes=[15, 16, 45], conf=0.38, verbose=False)
+                            if results:
+                                last_overlay_items = update_live_pet_detections(results[0], frame.shape, raw_frame=raw_copy)
+                        except Exception:
+                            pass
+                    frame = draw_detection_labels(frame, last_overlay_items)
+                else:
+                    last_overlay_items = []
+
+                height, width = frame.shape[:2]
+                if width > 640:
+                    output_height = max(1, int(round(height * 640 / width)))
+                    frame = cv2.resize(frame, (640, output_height), interpolation=cv2.INTER_AREA)
+
+                encoded_ok, encoded = cv2.imencode(".jpg", frame, [int(cv2.IMWRITE_JPEG_QUALITY), 70])
                 if encoded_ok:
                     with camera_state_lock:
                         latest_camera_jpeg = encoded.tobytes()
                         latest_raw_frame = raw_copy
+                        latest_annotated_frame = frame.copy()
+                frame_index += 1
                 camera_stop_event.wait(0.04)
         finally:
             capture.release()
@@ -1224,6 +1281,7 @@ def _camera_capture_worker():
         camera_status = "desconectada"
         latest_camera_jpeg = None
         latest_raw_frame = None
+        latest_annotated_frame = None
 
 
 def start_camera_capture():
@@ -1255,7 +1313,7 @@ def start_camera_capture():
 
 
 def stop_camera_capture():
-    global camera_thread, camera_status, latest_camera_jpeg, latest_raw_frame
+    global camera_thread, camera_status, latest_camera_jpeg, latest_raw_frame, latest_annotated_frame
     with camera_control_lock:
         camera_stop_event.set()
         if camera_thread is not None and camera_thread.is_alive():
@@ -1265,10 +1323,14 @@ def stop_camera_capture():
             camera_status = "desconectada"
             latest_camera_jpeg = None
             latest_raw_frame = None
+            latest_annotated_frame = None
         latest_pet_detections.clear()
         latest_track_boxes.clear()
     with pet_assignment_lock:
         pet_assignments.clear()
+    with track_species_lock:
+        track_species_votes.clear()
+        track_species_locks.clear()
     water_interaction_sessions.clear()
     food_interaction_sessions.clear()
     PET_MONITOR_CHECK_AT.clear()
