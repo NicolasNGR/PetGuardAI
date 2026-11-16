@@ -6,6 +6,8 @@ import androidx.compose.runtime.setValue
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
 import android.net.Uri
+import com.google.firebase.auth.FirebaseAuth
+import com.google.firebase.auth.FirebaseAuth.AuthStateListener
 import com.petguard.ai.data.AuthValidator
 import com.petguard.ai.data.CameraDevice
 import com.petguard.ai.data.CameraAlert
@@ -19,6 +21,7 @@ import com.petguard.ai.data.PetEvent
 import com.petguard.ai.data.PetDailyGoals
 import com.petguard.ai.data.PetGuardContent
 import com.petguard.ai.data.PetGuardRepository
+import com.petguard.ai.data.PetGuardSessionStore
 import com.petguard.ai.data.PetPreferences
 import com.petguard.ai.data.PetProfile
 import com.petguard.ai.data.RepositoryResult
@@ -49,21 +52,23 @@ class PetGuardViewModel(
         (com.petguard.ai.BuildConfig.SUPABASE_URL.isBlank() || com.petguard.ai.BuildConfig.SUPABASE_ANON_KEY.isBlank()))
         com.petguard.ai.data.PreviewPetGuardRepository() else FirebaseAuthPetGuardRepository()
 ) : ViewModel() {
+    private val savedSessionAtStartup = PetGuardSessionStore.read()
+    private val initialFirebaseUser = runCatching { FirebaseAuth.getInstance().currentUser }.getOrNull()
     val localSessionMode: Boolean = com.petguard.ai.BuildConfig.DEBUG &&
         (com.petguard.ai.BuildConfig.SUPABASE_URL.isBlank() || com.petguard.ai.BuildConfig.SUPABASE_ANON_KEY.isBlank())
     var addPetDialogRequested by mutableStateOf(false); private set
-    var email by mutableStateOf(""); private set
+    var email by mutableStateOf(savedSessionAtStartup?.email.orEmpty()); private set
     var password by mutableStateOf(""); private set
     var passwordConfirmation by mutableStateOf(""); private set
     var signUpName by mutableStateOf(""); private set
     var authState by mutableStateOf<AuthUiState>(AuthUiState.Idle); private set
-    var page by mutableStateOf<PetGuardPage?>(null); private set
+    var page by mutableStateOf(if (initialFirebaseUser != null) PetGuardPage.Home else null); private set
     var lightTheme by mutableStateOf(false); private set
     var highContrast by mutableStateOf(false); private set
     var yoloEnabled by mutableStateOf(true); private set
     var notificationsEnabled by mutableStateOf(true); private set
     var selectedDate by mutableStateOf(LocalDate.now().toString()); private set
-    var tutorEmail by mutableStateOf(""); private set
+    var tutorEmail by mutableStateOf(initialFirebaseUser?.email ?: savedSessionAtStartup?.email.orEmpty()); private set
     var tutorName by mutableStateOf("Tutor PetGuard"); private set
     var pets by mutableStateOf(emptyList<PetProfile>()); private set
     var selectedPetId by mutableStateOf(""); private set
@@ -104,11 +109,14 @@ class PetGuardViewModel(
     private var sharedSyncJob: Job? = null
     private var lastProcessedAlertId = 0L
     private var hasLoadedAlertBaseline = false
+    private var activeSessionUid: String = ""
+    private var savedSessionUid: String = savedSessionAtStartup?.uid.orEmpty()
+    private var authStateListener: AuthStateListener? = null
     private val assignmentRequestsInFlight = mutableSetOf<Int>()
     private var deletingPetIds by mutableStateOf<Set<String>>(emptySet())
     private var deletedPetIds by mutableStateOf<Set<String>>(emptySet())
 
-    init { loadContent(); restoreSession() }
+    init { restoreSession() }
 
     fun onEmailChange(value: String) { email = AuthValidator.sanitizeEmail(value); authState = AuthUiState.Idle }
     fun onPasswordChange(value: String) { password = AuthValidator.sanitizePassword(value); authState = AuthUiState.Idle }
@@ -126,12 +134,9 @@ class PetGuardViewModel(
             authState = AuthUiState.Loading
             when (val result = safely { repository.signIn(email.trim(), password) }) {
                 is RepositoryResult.Success -> {
-                    tutorEmail = result.value
                     authState = AuthUiState.Success
                     password = ""
-                    page = PetGuardPage.Home
-                    loadContent()
-                    startSharedSync()
+                    enterApp(result.value)
                 }
                 is RepositoryResult.Failure -> authState = AuthUiState.Error(result.message)
             }
@@ -147,11 +152,8 @@ class PetGuardViewModel(
             authState = AuthUiState.Loading
             when (val result = safely { repository.signInWithGoogleIdToken(idToken) }) {
                 is RepositoryResult.Success -> {
-                    tutorEmail = result.value
                     authState = AuthUiState.Success
-                    page = PetGuardPage.Home
-                    loadContent()
-                    startSharedSync()
+                    enterApp(result.value)
                 }
                 is RepositoryResult.Failure -> authState = AuthUiState.Error(result.message)
             }
@@ -183,14 +185,11 @@ class PetGuardViewModel(
             authState = AuthUiState.Loading
             when (val result = safely { repository.createAccount(safeName, email.trim(), password) }) {
                 is RepositoryResult.Success -> {
-                    tutorEmail = result.value
                     tutorName = safeName
                     authState = AuthUiState.Success
                     password = ""
                     passwordConfirmation = ""
-                    page = PetGuardPage.Home
-                    loadContent()
-                    startSharedSync()
+                    enterApp(result.value)
                 }
                 is RepositoryResult.Failure -> authState = AuthUiState.Error(result.message)
             }
@@ -198,17 +197,48 @@ class PetGuardViewModel(
     }
 
     private fun restoreSession() {
-        viewModelScope.launch {
-            when (val result = safely { repository.currentUserEmail() }) {
-                is RepositoryResult.Success -> result.value?.let { email ->
-                    tutorEmail = email
-                    page = PetGuardPage.Home
-                    loadContent()
-                    startSharedSync()
-                }
-                is RepositoryResult.Failure -> Unit
-            }
+        val savedSession = savedSessionAtStartup
+        if (savedSession != null && tutorEmail.isBlank()) tutorEmail = savedSession.email
+        val auth = runCatching { FirebaseAuth.getInstance() }.getOrNull() ?: return
+        auth.currentUser?.let { user ->
+            activateFirebaseSession(user.uid, user.email.orEmpty())
         }
+        val listener = AuthStateListener { firebaseAuth ->
+            firebaseAuth.currentUser?.let { user -> activateFirebaseSession(user.uid, user.email.orEmpty()) }
+        }
+        authStateListener = listener
+        auth.addAuthStateListener(listener)
+    }
+
+    private fun enterApp(email: String) {
+        val user = runCatching { FirebaseAuth.getInstance().currentUser }.getOrNull()
+        if (user != null) activateFirebaseSession(user.uid, user.email ?: email)
+        else {
+            tutorEmail = email
+            page = PetGuardPage.Home
+            loadContent()
+            startSharedSync()
+        }
+    }
+
+    private fun activateFirebaseSession(uid: String, email: String) {
+        if (uid.isBlank()) return
+        PetGuardSessionStore.save(uid, email)
+        tutorEmail = email
+        val needsInitialLoad = activeSessionUid != uid || savedSessionUid != uid || page == null
+        activeSessionUid = uid
+        savedSessionUid = uid
+        page = PetGuardPage.Home
+        if (needsInitialLoad) {
+            loadContent()
+            startSharedSync()
+        }
+    }
+
+    override fun onCleared() {
+        authStateListener?.let { listener -> runCatching { FirebaseAuth.getInstance().removeAuthStateListener(listener) } }
+        authStateListener = null
+        super.onCleared()
     }
 
     fun requestPasswordReset() {
@@ -472,6 +502,10 @@ class PetGuardViewModel(
 
     fun consumeAddPetDialogRequest() { addPetDialogRequested = false }
     fun signOut() {
+        PetGuardSessionStore.clear()
+        activeSessionUid = ""
+        savedSessionUid = ""
+        runCatching { FirebaseAuth.getInstance().signOut() }
         page = null
         cameraPrivacyAccepted = false
         cameraStreamUrl = null
