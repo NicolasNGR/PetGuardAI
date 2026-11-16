@@ -15,7 +15,8 @@ val localProperties = Properties().apply {
 
 fun quotedBuildConfig(value: String): String = "\"${value.replace("\\", "\\\\").replace("\"", "\\\"")}\""
 val supabaseUrl = System.getenv("SUPABASE_URL")?.takeIf { it.isNotBlank() }
-    ?: localProperties.getProperty("supabase.url", "")
+    ?: localProperties.getProperty("supabase.url")?.takeIf { it.isNotBlank() }
+    ?: "https://bnkdcrayaankvyezmbhh.supabase.co"
 val resolvedSupabaseUrl = supabaseUrl.trim()
 val supabaseAnonKey = System.getenv("SUPABASE_ANON_KEY")?.takeIf { it.isNotBlank() }
     ?: localProperties.getProperty("supabase.anonKey")
