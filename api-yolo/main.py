@@ -101,6 +101,11 @@ pet_presence_states = {}
 
 HYDRATION_ALERT_AFTER_SECONDS = max(10, int(os.getenv("PETGUARD_HYDRATION_ALERT_SECONDS", "28800")))
 FEEDING_ALERT_AFTER_SECONDS = max(10, int(os.getenv("PETGUARD_FEEDING_ALERT_SECONDS", "43200")))
+_demo_routine_seconds = os.getenv("PETGUARD_DEMO_ROUTINE_SECONDS", "").strip()
+try:
+    DEMO_ROUTINE_SECONDS = max(1, int(_demo_routine_seconds)) if _demo_routine_seconds else None
+except ValueError:
+    DEMO_ROUTINE_SECONDS = None
 PRESENCE_LOST_AFTER_SECONDS = max(5, int(os.getenv("PETGUARD_PRESENCE_LOST_SECONDS", "120")))
 REID_SIMILARITY_THRESHOLD = float(os.getenv("PETGUARD_REID_THRESHOLD", "0.68"))
 
@@ -395,8 +400,20 @@ def point_inside_normalized_zone(point, zone, frame_width, frame_height):
     return x1 <= point[0] <= x2 and y1 <= point[1] <= y2
 
 
+def box_intersects_normalized_zone(box, zone, frame_width, frame_height):
+    """Treat a pet as visiting a bowl zone when its bounding box overlaps it."""
+    box_x1, box_y1, box_x2, box_y2 = (float(value) for value in box[:4])
+    zone_x1 = zone["x1"] * frame_width
+    zone_x2 = zone["x2"] * frame_width
+    zone_y1 = zone["y1"] * frame_height
+    zone_y2 = zone["y2"] * frame_height
+    return box_x1 <= zone_x2 and box_x2 >= zone_x1 and box_y1 <= zone_y2 and box_y2 >= zone_y1
+
+
 def get_pet_alert_thresholds(pet_size: str, pet_weight: float | None):
     """Return water and food alert thresholds adjusted for the pet's size/weight."""
+    if DEMO_ROUTINE_SECONDS is not None:
+        return DEMO_ROUTINE_SECONDS, DEMO_ROUTINE_SECONDS
     size = (pet_size or "medio").strip().casefold()
     if pet_weight is not None:
         factor = 0.75 if pet_weight < 10 else 1.25 if pet_weight > 25 else 1.0
@@ -622,7 +639,7 @@ def update_live_pet_detections(result, frame_shape, raw_frame: np.ndarray | None
                 (
                     "ALIMENTACAO" if kind == "comida" else "HIDRATACAO"
                     for kind, zone in zones.items()
-                    if point_inside_normalized_zone(center, zone, frame_width, frame_height)
+                    if box_intersects_normalized_zone(box, zone, frame_width, frame_height)
                 ),
                 None,
             )
@@ -673,7 +690,7 @@ def update_live_pet_detections(result, frame_shape, raw_frame: np.ndarray | None
                     session["last_seen"] = now
                 session = sessions[tid]
                 duration = (now - session["started_at"]).total_seconds()
-                if duration >= 3 and not session["recorded"]:
+                if duration >= 2 and not session["recorded"]:
                     recorder = record_water_interaction if interaction == "HIDRATACAO" else record_food_interaction
                     category_label = "zona de água" if interaction == "HIDRATACAO" else "zona de ração"
                     recorder(detection["pet_id"], detection["pet_name"], now, session["pet_size"], session.get("pet_weight"))
@@ -697,10 +714,11 @@ def update_live_pet_detections(result, frame_shape, raw_frame: np.ndarray | None
         for track_id, session in list(sessions.items()):
             if track_id in active_tracks and next((d["interaction"] for d in detections if d["track_id"] == track_id), None) == interaction_name:
                 continue
-            if (now - session["last_seen"]).total_seconds() < 2:
+            # Keep the session through a brief detector miss, then close it after a 1 s grace period.
+            if (now - session["last_seen"]).total_seconds() < 1:
                 continue
             duration = (session["last_seen"] - session["started_at"]).total_seconds()
-            if duration >= 3 and not session["recorded"]:
+            if duration >= 2 and not session["recorded"]:
                 recorder(session["pet_id"], session["pet_name"], now, session.get("pet_size", "medio"), session.get("pet_weight"))
                 category_label = "zona de água" if interaction_name == "HIDRATACAO" else "zona de ração"
                 create_pet_alert(
@@ -984,7 +1002,7 @@ async def analisar_frame(file: UploadFile = File(...), user: dict = Depends(requ
 
                 interagindo_tipo = None
                 for tipo_zona, coords_roi in rois.items():
-                    if point_inside_normalized_zone(centro_atual, coords_roi, frame.shape[1], frame.shape[0]):
+                    if box_intersects_normalized_zone(box, coords_roi, frame.shape[1], frame.shape[0]):
                         interagindo_tipo = "ALIMENTACAO" if tipo_zona == "comida" else "HIDRATACAO"
                         break
 
