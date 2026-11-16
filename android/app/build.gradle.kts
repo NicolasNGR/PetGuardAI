@@ -19,8 +19,10 @@ val supabaseUrl = System.getenv("SUPABASE_URL")?.takeIf { it.isNotBlank() }
     ?: "https://bnkdcrayaankvyezmbhh.supabase.co"
 val resolvedSupabaseUrl = supabaseUrl.trim()
 val supabaseAnonKey = System.getenv("SUPABASE_ANON_KEY")?.takeIf { it.isNotBlank() }
-    ?: localProperties.getProperty("supabase.anonKey")
-    ?: localProperties.getProperty("supabase.publishableKey", "")
+    ?: System.getenv("SUPABASE_PUBLISHABLE_KEY")?.takeIf { it.isNotBlank() }
+    ?: localProperties.getProperty("supabase.anonKey")?.takeIf { it.isNotBlank() }
+    ?: localProperties.getProperty("supabase.publishableKey")?.takeIf { it.isNotBlank() }
+    ?: "sb_publishable_aw2ucaH2LJE4Y2czo1USBw_I6RYQI43"
 val resolvedSupabaseAnonKey = supabaseAnonKey.trim()
 val firebaseConfigured = file("google-services.json").exists()
 
@@ -40,6 +42,7 @@ android {
         versionName = "1.0"
         buildConfigField("String", "SUPABASE_URL", quotedBuildConfig(resolvedSupabaseUrl))
         buildConfigField("String", "SUPABASE_ANON_KEY", quotedBuildConfig(resolvedSupabaseAnonKey))
+        buildConfigField("String", "SUPABASE_PUBLISHABLE_KEY", quotedBuildConfig(resolvedSupabaseAnonKey))
         buildConfigField("boolean", "FIREBASE_CONFIGURED", firebaseConfigured.toString())
     }
     buildFeatures {
