@@ -22,6 +22,7 @@ val supabaseAnonKey = System.getenv("SUPABASE_ANON_KEY")?.takeIf { it.isNotBlank
     ?: localProperties.getProperty("supabase.anonKey")
     ?: localProperties.getProperty("supabase.publishableKey", "")
 val resolvedSupabaseAnonKey = supabaseAnonKey.trim()
+val firebaseConfigured = file("google-services.json").exists()
 
 // Firebase lê as opções do projeto neste arquivo; o plugin é aplicado assim que ele existir.
 if (file("google-services.json").exists()) {
@@ -39,6 +40,7 @@ android {
         versionName = "1.0"
         buildConfigField("String", "SUPABASE_URL", quotedBuildConfig(resolvedSupabaseUrl))
         buildConfigField("String", "SUPABASE_ANON_KEY", quotedBuildConfig(resolvedSupabaseAnonKey))
+        buildConfigField("boolean", "FIREBASE_CONFIGURED", firebaseConfigured.toString())
     }
     buildFeatures {
         compose = true

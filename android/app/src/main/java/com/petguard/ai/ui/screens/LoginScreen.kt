@@ -52,6 +52,9 @@ fun LoginScreen(vm: PetGuardViewModel) {
         if (vm.localSessionMode) {
             Text("Modo local de demonstração: os dados não serão sincronizados.", Modifier.padding(top = 8.dp),
                 color = mutedTextColor, style = MaterialTheme.typography.bodySmall)
+        } else if (!vm.supabaseSyncConfigured) {
+            Text("Login na nuvem disponível; configure SUPABASE_ANON_KEY para sincronizar pets e eventos.", Modifier.padding(top = 8.dp),
+                color = mutedTextColor, style = MaterialTheme.typography.bodySmall)
         }
         Spacer(Modifier.height(40.dp))
         Column(Modifier.fillMaxWidth()) {

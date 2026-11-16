@@ -49,13 +49,15 @@ sealed interface AuthUiState {
 
 class PetGuardViewModel(
     private val repository: PetGuardRepository = if (com.petguard.ai.BuildConfig.DEBUG &&
-        (com.petguard.ai.BuildConfig.SUPABASE_URL.isBlank() || com.petguard.ai.BuildConfig.SUPABASE_ANON_KEY.isBlank()))
+        !com.petguard.ai.BuildConfig.FIREBASE_CONFIGURED)
         com.petguard.ai.data.PreviewPetGuardRepository() else FirebaseAuthPetGuardRepository()
 ) : ViewModel() {
     private val savedSessionAtStartup = PetGuardSessionStore.read()
     private val initialFirebaseUser = runCatching { FirebaseAuth.getInstance().currentUser }.getOrNull()
     val localSessionMode: Boolean = com.petguard.ai.BuildConfig.DEBUG &&
-        (com.petguard.ai.BuildConfig.SUPABASE_URL.isBlank() || com.petguard.ai.BuildConfig.SUPABASE_ANON_KEY.isBlank())
+        !com.petguard.ai.BuildConfig.FIREBASE_CONFIGURED
+    val supabaseSyncConfigured: Boolean = com.petguard.ai.BuildConfig.SUPABASE_URL.isNotBlank() &&
+        com.petguard.ai.BuildConfig.SUPABASE_ANON_KEY.isNotBlank()
     var addPetDialogRequested by mutableStateOf(false); private set
     var email by mutableStateOf(savedSessionAtStartup?.email.orEmpty()); private set
     var password by mutableStateOf(""); private set
