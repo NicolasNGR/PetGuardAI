@@ -15,11 +15,8 @@ import java.net.URLEncoder
 import kotlin.coroutines.resume
 import kotlin.coroutines.resumeWithException
 
-/** Sincroniza o estado da conta numa linha protegida pelo UID autenticado do Firebase. */
+/** Firebase Auth fornece o UID; Supabase armazena o perfil, pets e eventos sob RLS por UID. */
 class SupabasePetGuardRepository : PetGuardRepository {
-    private companion object {
-        const val PROJECT_URL = "https://bnkdcrayaankvyezmbhh.supabase.co"
-    }
     override suspend fun currentUserEmail(): RepositoryResult<String?> = RepositoryResult.Success(currentFirebaseUser()?.email)
     override suspend fun signIn(email: String, password: String) = RepositoryResult.Failure("Autenticação indisponível nesta fonte de dados.")
     override suspend fun signInWithGoogleIdToken(idToken: String) = RepositoryResult.Failure("Autenticação indisponível nesta fonte de dados.")
@@ -27,11 +24,7 @@ class SupabasePetGuardRepository : PetGuardRepository {
     override suspend fun sendPasswordReset(email: String) = RepositoryResult.Failure("Autenticação indisponível nesta fonte de dados.")
     override suspend fun signOut() = RepositoryResult.Success(Unit)
 
-    override suspend fun loadContent(): RepositoryResult<PetGuardContent> = cloudCall {
-        val row = request("GET", "?select=payload", null).arrayOrEmpty().optJSONObject(0)
-        val payload = row?.optJSONObject("payload") ?: return@cloudCall emptyContent()
-        payload.toContent(currentFirebaseUser()?.email.orEmpty())
-    }
+    override suspend fun loadContent(): RepositoryResult<PetGuardContent> = cloudCall { fetchContent() }
 
     override suspend fun savePreferences(preferences: PetPreferences) =
         mutate { it.copy(preferences = preferences) }.mapToUnit()
@@ -53,15 +46,33 @@ class SupabasePetGuardRepository : PetGuardRepository {
     override suspend fun removeCamera(id: String): RepositoryResult<List<CameraDevice>> =
         mutate { content -> content.copy(cameras = content.cameras.filterNot { it.id == id }) }.map { it.cameras }
 
-    override suspend fun updatePet(pet: PetProfile): RepositoryResult<PetProfile> =
-        mutate { content -> content.copy(pets = content.pets.map { if (it.id == pet.id) pet else it }) }
-            .map { content -> content.pets.firstOrNull { it.id == pet.id } ?: pet }
+    override suspend fun updatePet(pet: PetProfile): RepositoryResult<PetProfile> = cloudCall {
+        val user = currentFirebaseUser() ?: error("Entre novamente para sincronizar seus dados.")
+        val rows = requestTable("pets", "user_id", "POST", "?on_conflict=id,user_id", pet.toSupabaseJson(user.uid), "resolution=merge-duplicates,return=representation")
+            .arrayOrEmpty()
+        rows.optJSONObject(0)?.toPet() ?: error("N\u00e3o foi poss\u00edvel atualizar esse pet.")
+    }
 
-    override suspend fun addPet(name: String, species: String): RepositoryResult<List<PetProfile>> =
-        mutate { content ->
-            val pet = PetProfile("pet-" + java.util.UUID.randomUUID(), name, species, "", "")
-            content.copy(pets = content.pets + pet, selectedPetId = pet.id)
-        }.map { it.pets }
+    override suspend fun addPet(name: String, species: String): RepositoryResult<List<PetProfile>> = cloudCall {
+        val user = currentFirebaseUser() ?: error("Entre novamente para sincronizar seus dados.")
+        val pet = PetProfile("pet-" + java.util.UUID.randomUUID(), name, species, "", "")
+        requestTable("pets", "user_id", "POST", "?on_conflict=id,user_id", pet.toSupabaseJson(user.uid), "resolution=merge-duplicates,return=minimal")
+        val updatedPets = fetchPets()
+        runCatching { saveContent(fetchContent().copy(selectedPetId = pet.id)) }
+        updatedPets
+    }
+
+    override suspend fun deletePet(id: String): RepositoryResult<Unit> = cloudCall {
+        val current = fetchContent()
+        val removed = requestTable("pets", "user_id", "DELETE", "?id=eq.${encode(id)}&select=id", null, "return=representation")
+            .arrayOrEmpty()
+        if (removed.length() == 0) error("N\u00e3o foi poss\u00edvel localizar esse pet na sua conta.")
+        val remainingPets = fetchPets()
+        val remainingEvents = fetchEvents()
+        val nextSelectedId = if (current.selectedPetId == id) remainingPets.firstOrNull()?.id.orEmpty() else current.selectedPetId
+        runCatching { saveContent(current.copy(pets = remainingPets, events = remainingEvents, selectedPetId = nextSelectedId)) }
+        Unit
+    }
 
     override suspend fun selectPet(id: String): RepositoryResult<PetProfile> = cloudCall {
         val content = fetchContent()
@@ -73,12 +84,25 @@ class SupabasePetGuardRepository : PetGuardRepository {
     override suspend fun updateTutorName(name: String): RepositoryResult<String> =
         mutate { content -> content.copy(tutor = content.tutor.copy(name = name)) }.map { it.tutor.name }
 
-    override suspend fun addEvent(event: PetEvent): RepositoryResult<Unit> =
-        mutate { content -> content.copy(events = (content.events.filterNot { it.id == event.id } + event).takeLast(300)) }
-            .mapToUnit()
+    override suspend fun addEvent(event: PetEvent): RepositoryResult<Unit> = cloudCall {
+        val user = currentFirebaseUser() ?: error("Entre novamente para sincronizar seus dados.")
+        val json = JSONObject()
+            .put("id", event.id)
+            .put("user_id", user.uid)
+            .put("pet_id", if (event.petId.isBlank()) JSONObject.NULL else event.petId)
+            .put("date", event.date)
+            .put("category", event.category.name)
+            .put("title", event.title)
+            .put("detail", event.detail)
+            .put("time_label", event.timeLabel)
+        requestTable("events", "user_id", "POST", "?on_conflict=id,user_id", json, "resolution=merge-duplicates,return=minimal")
+        Unit
+    }
 
-    override suspend fun clearApiEvents(): RepositoryResult<Unit> =
-        mutate { content -> content.copy(events = content.events.filterNot { it.id.startsWith("api-alert-") }) }.mapToUnit()
+    override suspend fun clearApiEvents(): RepositoryResult<Unit> = cloudCall {
+        requestTable("events", "user_id", "DELETE", "?id=like.api-alert-%25", null, "return=minimal")
+        Unit
+    }
 
     private suspend fun mutate(transform: (PetGuardContent) -> PetGuardContent): RepositoryResult<PetGuardContent> = cloudCall {
         val updated = transform(fetchContent())
@@ -88,8 +112,30 @@ class SupabasePetGuardRepository : PetGuardRepository {
 
     private suspend fun fetchContent(): PetGuardContent {
         val row = request("GET", "?select=payload", null).arrayOrEmpty().optJSONObject(0)
-        return row?.optJSONObject("payload")?.toContent(currentFirebaseUser()?.email.orEmpty()) ?: emptyContent()
+        val base = row?.optJSONObject("payload")?.toContent(currentFirebaseUser()?.email.orEmpty()) ?: emptyContent()
+        return base.copy(pets = fetchPets(), events = fetchEvents())
     }
+
+    private suspend fun fetchPets(): List<PetProfile> = requestTable("pets", "user_id", "GET", "?select=*&order=created_at.asc", null)
+        .arrayOrEmpty().let { rows -> buildList { for (i in 0 until rows.length()) rows.optJSONObject(i)?.let { add(it.toPet()) } } }
+
+    private suspend fun fetchEvents(): List<PetEvent> = requestTable("events", "user_id", "GET", "?select=*&order=date.desc,time_label.desc&limit=300", null)
+        .arrayOrEmpty().let { rows -> buildList {
+            for (i in 0 until rows.length()) rows.optJSONObject(i)?.let { row ->
+                val category = runCatching { EventCategory.valueOf(row.optString("category")) }.getOrDefault(EventCategory.ACTIVITY)
+                add(PetEvent(row.optString("id"), row.optString("date"), category, row.optString("title"), row.optString("detail"), row.optString("time_label"), row.optString("pet_id")))
+            }
+        } }
+
+    private fun PetProfile.toSupabaseJson(userId: String) = JSONObject()
+        .put("id", id).put("user_id", userId).put("name", name).put("species", species)
+        .put("breed", breed).put("age_label", ageLabel).put("porte", porte)
+        .put("peso_kg", pesoKg ?: JSONObject.NULL)
+
+    private fun JSONObject.toPet() = PetProfile(
+        optString("id"), optString("name"), optString("species"), optString("breed"),
+        optString("age_label"), optString("porte", "medio"), if (isNull("peso_kg")) null else optDouble("peso_kg")
+    )
 
     private suspend fun saveContent(content: PetGuardContent) {
         val user = currentFirebaseUser() ?: error("Entre novamente para sincronizar seus dados.")
@@ -97,18 +143,21 @@ class SupabasePetGuardRepository : PetGuardRepository {
         request("POST", "?on_conflict=firebase_uid", json, "resolution=merge-duplicates,return=minimal")
     }
 
-    private suspend fun request(method: String, query: String, body: JSONObject?, prefer: String? = null): String =
+    private suspend fun requestTable(table: String, ownerColumn: String, method: String, query: String, body: JSONObject?, prefer: String? = null): String =
+        request(method, query, body, prefer, table, ownerColumn)
+
+    private suspend fun request(method: String, query: String, body: JSONObject?, prefer: String? = null, table: String = "petguard_user_data", ownerColumn: String = "firebase_uid"): String =
         withContext(Dispatchers.IO) {
-            val baseUrl = PROJECT_URL
-            val publishableKey = BuildConfig.SUPABASE_PUBLISHABLE_KEY
-            if (publishableKey.isBlank()) {
+            val baseUrl = BuildConfig.SUPABASE_URL.trimEnd('/')
+            val publishableKey = BuildConfig.SUPABASE_ANON_KEY
+            if (baseUrl.isBlank() || publishableKey.isBlank()) {
                 error("A chave Publishable do Supabase ainda não foi configurada no app.")
             }
             val user = currentFirebaseUser() ?: error("Entre novamente para sincronizar seus dados.")
             val token = firebaseAccessToken(user)
             val suffix = if (query.startsWith("?")) query else "?" + query
-            val userFilter = if (method == "GET") "&firebase_uid=eq." + encode(user.uid) else ""
-            val connection = (URL(baseUrl + "/rest/v1/petguard_user_data" + suffix + userFilter))
+            val userFilter = if (method == "GET" || method == "PATCH" || method == "DELETE") "&$ownerColumn=eq." + encode(user.uid) else ""
+            val connection = (URL(baseUrl + "/rest/v1/" + table + suffix + userFilter))
                 .openConnection() as HttpURLConnection
             try {
                 connection.requestMethod = method

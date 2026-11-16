@@ -51,6 +51,7 @@ fun ProfileScreen(vm: PetGuardViewModel) {
     var editPet by remember { mutableStateOf(false) }
     var editTutor by remember { mutableStateOf(false) }
     var confirmResetDemo by remember { mutableStateOf(false) }
+    var petPendingDelete by remember { mutableStateOf<PetProfile?>(null) }
     LaunchedEffect(vm.addPetDialogRequested) {
         if (vm.addPetDialogRequested) {
             showPetManager = true
@@ -134,10 +135,18 @@ fun ProfileScreen(vm: PetGuardViewModel) {
         onDismiss = { showPetManager = false; startAddingPet = false },
         onSelect = vm::selectPet,
         onEditSelected = { showPetManager = false; editPet = true },
-        onAddPet = { name, species, size, weight -> vm.addPet(name, species, size, weight) }
+        onAddPet = { name, species, size, weight -> vm.addPet(name, species, size, weight) },
+        onDeleteRequest = { petPendingDelete = it }
     )
     if (editPet && vm.pets.isNotEmpty()) EditPetDialog(vm.pet, onDismiss = { editPet = false }, onSave = { name, species, size, weight -> vm.updatePet(name, species, size, weight); editPet = false })
     if (editTutor) EditTutorNameDialog(vm.tutorName, onDismiss = { editTutor = false }, onSave = { name -> vm.updateTutorName(name); editTutor = false })
+    petPendingDelete?.let { pet ->
+        AlertDialog(onDismissRequest = { petPendingDelete = null },
+            title = { Text("Excluir ${pet.name.replaceFirstChar { it.uppercase() }}?") },
+            text = { Text("O pet e os eventos vinculados serão removidos da sua conta.") },
+            confirmButton = { TextButton(onClick = { vm.deletePet(pet); petPendingDelete = null }) { Text("Excluir") } },
+            dismissButton = { TextButton(onClick = { petPendingDelete = null }) { Text("Cancelar") } })
+    }
     if (confirmResetDemo) AlertDialog(onDismissRequest = { confirmResetDemo = false }, title = { Text("Limpar histórico de testes?") },
         text = { Text("Alertas e dados de demonstração da câmera serão removidos.") },
         confirmButton = { TextButton(onClick = { vm.resetDemoData(); confirmResetDemo = false }) { Text("Limpar") } },
@@ -171,7 +180,8 @@ private fun PetsDialog(
     onDismiss: () -> Unit,
     onSelect: (String) -> Unit,
     onEditSelected: () -> Unit,
-    onAddPet: (String, String, String, Double?) -> Unit
+    onAddPet: (String, String, String, Double?) -> Unit,
+    onDeleteRequest: (PetProfile) -> Unit
 ) {
     var adding by remember(startAdding) { mutableStateOf(startAdding) }
     var name by remember { mutableStateOf("") }
@@ -197,6 +207,9 @@ private fun PetsDialog(
                                 Column(Modifier.weight(1f).padding(start = 12.dp)) {
                                     Text(pet.name.replaceFirstChar { it.uppercase() }, color = MaterialTheme.colorScheme.onSurface)
                                     Text(pet.species, color = MaterialTheme.colorScheme.onSurface.copy(alpha = .7f), style = MaterialTheme.typography.bodySmall)
+                                }
+                                IconButton(onClick = { onDeleteRequest(pet) }) {
+                                    Icon(Icons.Default.Delete, "Excluir ${pet.name}", tint = MaterialTheme.colorScheme.error)
                                 }
                                 RadioButton(selected = pet.id == selectedId, onClick = null)
                             }

@@ -31,6 +31,7 @@ import java.util.Locale
 fun TimelineScreen(vm: PetGuardViewModel) {
     val signals = petSignalColors()
     val selected = remember(vm.selectedDate) { LocalDate.parse(vm.selectedDate) }
+    val dayEvents = vm.eventsForSelectedDay()
     val dateLabel = remember(selected) { selected.format(DateTimeFormatter.ofPattern("d 'de' MMMM 'de' yyyy", Locale("pt", "BR"))) }
     var showCalendar by remember { mutableStateOf(false) }
     Column(Modifier.fillMaxSize().verticalScroll(rememberScrollState()).padding(horizontal = 20.dp)) {
@@ -65,7 +66,7 @@ fun TimelineScreen(vm: PetGuardViewModel) {
         }
         Spacer(Modifier.height(18.dp))
         when {
-            vm.eventsForSelectedDay().isNotEmpty() -> vm.eventsForSelectedDay().forEach { event ->
+            dayEvents.isNotEmpty() -> dayEvents.forEach { event ->
                 val (label, color) = when (event.category) {
                     EventCategory.ATTENTION -> "Atenção" to signals.attention
                     EventCategory.INJURY -> "Machucado" to signals.danger
@@ -86,7 +87,7 @@ fun TimelineScreen(vm: PetGuardViewModel) {
                 Text(vm.contentError.orEmpty(), color = MaterialTheme.colorScheme.error)
                 TextButton(onClick = vm::loadContent) { Text("Tentar novamente") }
             }
-            vm.eventsForSelectedDay().isEmpty() -> Surface(color = MaterialTheme.colorScheme.surface, shape = RoundedCornerShape(14.dp)) {
+            dayEvents.isEmpty() -> Surface(color = MaterialTheme.colorScheme.surface, shape = RoundedCornerShape(14.dp)) {
                 Column(Modifier.fillMaxWidth().padding(18.dp), horizontalAlignment = Alignment.CenterHorizontally) {
                     Text("Nenhum acontecimento nesta data", color = MaterialTheme.colorScheme.onSurface)
                     Text("Os eventos detectados aparecerão aqui.", Modifier.padding(top = 5.dp), color = MaterialTheme.colorScheme.onSurface.copy(alpha = .75f), style = MaterialTheme.typography.bodySmall)

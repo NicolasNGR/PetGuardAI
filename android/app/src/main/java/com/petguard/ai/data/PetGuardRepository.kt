@@ -21,6 +21,7 @@ interface PetGuardRepository {
     suspend fun removeCamera(id: String): RepositoryResult<List<CameraDevice>>
     suspend fun updatePet(pet: PetProfile): RepositoryResult<PetProfile>
     suspend fun addPet(name: String, species: String): RepositoryResult<List<PetProfile>>
+    suspend fun deletePet(id: String): RepositoryResult<Unit>
     suspend fun selectPet(id: String): RepositoryResult<PetProfile>
     suspend fun updateTutorName(name: String): RepositoryResult<String>
 }
@@ -77,6 +78,12 @@ class PreviewPetGuardRepository : PetGuardRepository {
         pets = pets + pet
         selectedPetId = pet.id
         return RepositoryResult.Success(pets)
+    }
+    override suspend fun deletePet(id: String): RepositoryResult<Unit> {
+        if (pets.none { it.id == id }) return RepositoryResult.Failure("N\u00e3o foi poss\u00edvel localizar esse pet.")
+        pets = pets.filterNot { it.id == id }
+        if (selectedPetId == id) selectedPetId = pets.firstOrNull()?.id.orEmpty()
+        return RepositoryResult.Success(Unit)
     }
     override suspend fun selectPet(id: String): RepositoryResult<PetProfile> {
         val pet = pets.firstOrNull { it.id == id } ?: return RepositoryResult.Failure("Não foi possível localizar esse pet.")

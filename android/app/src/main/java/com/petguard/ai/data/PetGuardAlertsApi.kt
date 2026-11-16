@@ -69,13 +69,19 @@ object PetGuardAlertsApi {
         }.filter { it.trackId >= 0 && it.species in setOf("dog", "cat") }
     }
 
-    suspend fun assignDetection(cameraPageUrl: String, detection: LivePetDetection, pet: PetProfile?) = withContext(Dispatchers.IO) {
+    suspend fun assignDetection(
+        cameraPageUrl: String,
+        detection: LivePetDetection,
+        pet: PetProfile?,
+        forgetPetSignature: Boolean = false
+    ) = withContext(Dispatchers.IO) {
         val payload = JSONObject()
             .put("track_id", detection.trackId)
             .put("pet_id", pet?.id.orEmpty())
             .put("pet_name", pet?.name.orEmpty())
             .put("pet_species", pet?.species.orEmpty().lowercase())
             .put("pet_size", pet?.porte ?: "medio")
+        if (forgetPetSignature) payload.put("forget_pet_signature", true)
         pet?.pesoKg?.let { payload.put("pet_weight", it) }
         request(cameraPageUrl, "/detections/assign", "POST", payload.toString())
     }
@@ -136,7 +142,8 @@ object PetGuardAlertsApi {
 
     private suspend fun requestRaw(baseUrl: String, path: String, method: String, body: String?): ByteArray {
         val firebaseUser = runCatching { FirebaseAuth.getInstance().currentUser }.getOrNull()
-        val localPreviewEnabled = BuildConfig.DEBUG && BuildConfig.SUPABASE_PUBLISHABLE_KEY.isBlank()
+        val localPreviewEnabled = BuildConfig.DEBUG &&
+            (BuildConfig.SUPABASE_URL.isBlank() || BuildConfig.SUPABASE_ANON_KEY.isBlank())
         val firebaseToken = runCatching { firebaseUser?.getIdToken(false)?.awaitResult()?.token }.getOrNull()
             ?.takeIf { it.isNotBlank() }
         val idToken = firebaseToken

@@ -29,6 +29,7 @@ import kotlinx.coroutines.delay
 import kotlinx.coroutines.isActive
 import java.time.Instant
 import java.time.LocalDate
+import java.time.OffsetDateTime
 import java.time.ZoneId
 import java.text.Normalizer
 import kotlin.math.pow
@@ -44,10 +45,12 @@ sealed interface AuthUiState {
 }
 
 class PetGuardViewModel(
-    private val repository: PetGuardRepository = if (com.petguard.ai.BuildConfig.DEBUG && com.petguard.ai.BuildConfig.SUPABASE_PUBLISHABLE_KEY.isBlank())
+    private val repository: PetGuardRepository = if (com.petguard.ai.BuildConfig.DEBUG &&
+        (com.petguard.ai.BuildConfig.SUPABASE_URL.isBlank() || com.petguard.ai.BuildConfig.SUPABASE_ANON_KEY.isBlank()))
         com.petguard.ai.data.PreviewPetGuardRepository() else FirebaseAuthPetGuardRepository()
 ) : ViewModel() {
-    val localSessionMode: Boolean = com.petguard.ai.BuildConfig.DEBUG && com.petguard.ai.BuildConfig.SUPABASE_PUBLISHABLE_KEY.isBlank()
+    val localSessionMode: Boolean = com.petguard.ai.BuildConfig.DEBUG &&
+        (com.petguard.ai.BuildConfig.SUPABASE_URL.isBlank() || com.petguard.ai.BuildConfig.SUPABASE_ANON_KEY.isBlank())
     var addPetDialogRequested by mutableStateOf(false); private set
     var email by mutableStateOf(""); private set
     var password by mutableStateOf(""); private set
@@ -69,6 +72,7 @@ class PetGuardViewModel(
         ?: PetProfile("", "seu pet", "", "", "")
     val focusedPet: PetProfile get() = pet
     var events by mutableStateOf<List<PetEvent>>(emptyList()); private set
+    private var realtimeApiEvents by mutableStateOf<List<PetEvent>>(emptyList())
     var cameras by mutableStateOf<List<CameraDevice>>(emptyList()); private set
     var isLoading by mutableStateOf(false); private set
     var contentError by mutableStateOf<String?>(null); private set
@@ -101,6 +105,8 @@ class PetGuardViewModel(
     private var lastProcessedAlertId = 0L
     private var hasLoadedAlertBaseline = false
     private val assignmentRequestsInFlight = mutableSetOf<Int>()
+    private var deletingPetIds by mutableStateOf<Set<String>>(emptySet())
+    private var deletedPetIds by mutableStateOf<Set<String>>(emptySet())
 
     init { loadContent(); restoreSession() }
 
@@ -257,16 +263,24 @@ class PetGuardViewModel(
                 }
 
                 try {
-                    val incoming = PetGuardAlertsApi.fetch(camera.url, lastProcessedAlertId)
-                    val detections = PetGuardAlertsApi.fetchDetections(camera.url)
+                    val fetchedAlerts = PetGuardAlertsApi.fetch(camera.url, lastProcessedAlertId)
+                    val incoming = fetchedAlerts.filterNot { it.petId in deletedPetIds }
+                    val detections = PetGuardAlertsApi.fetchDetections(camera.url).map { detection ->
+                        if (detection.petId in deletedPetIds) detection.copy(petId = "", petName = "") else detection
+                    }
                     liveDetections = detections
                     autoAssignUnambiguousDetections(camera, detections)
                     if (incoming.isNotEmpty()) {
                         cameraAlerts = (cameraAlerts + incoming).distinctBy(CameraAlert::id).takeLast(300)
                         val activityEvents = incoming.map { alert ->
-                            val datePart = alert.timestamp.substringBefore('T').substringBefore(' ')
-                            val timePart = alert.timestamp.substringAfter('T').takeIf { it != alert.timestamp }
-                                ?.take(5) ?: alert.timestamp.substringAfter(' ').take(5)
+                            val localDateTime = runCatching {
+                                OffsetDateTime.parse(alert.timestamp).atZoneSameInstant(ZoneId.systemDefault())
+                            }.getOrNull()
+                            val datePart = localDateTime?.toLocalDate()?.toString()
+                                ?: alert.timestamp.substringBefore('T').substringBefore(' ')
+                            val timePart = localDateTime?.format(java.time.format.DateTimeFormatter.ofPattern("HH:mm"))
+                                ?: alert.timestamp.substringAfter('T').takeIf { it != alert.timestamp }?.take(5)
+                                ?: alert.timestamp.substringAfter(' ').take(5)
                             PetEvent(
                                 id = "api-alert-${alert.id}",
                                 date = datePart,
@@ -274,6 +288,7 @@ class PetGuardViewModel(
                                     "HIDRATACAO" -> EventCategory.HIDRATACAO
                                     "ALIMENTACAO" -> EventCategory.ALIMENTACAO
                                     "PRESENCA" -> EventCategory.PRESENCA
+                                    "ATTENTION" -> EventCategory.ATTENTION
                                     else -> EventCategory.ACTIVITY
                                 },
                                 title = when (alert.category.uppercase()) {
@@ -287,6 +302,10 @@ class PetGuardViewModel(
                                 petId = alert.petId
                             )
                         }
+                        realtimeApiEvents = (activityEvents + realtimeApiEvents)
+                            .distinctBy(PetEvent::id)
+                            .sortedWith(compareBy<PetEvent> { it.date }.thenBy { it.timeLabel })
+                            .takeLast(300)
                         events = (activityEvents + events).distinctBy(PetEvent::id).take(300)
                         activityEvents.forEach { event ->
                             when (val saved = safely { repository.addEvent(event) }) {
@@ -294,16 +313,15 @@ class PetGuardViewModel(
                                 is RepositoryResult.Failure -> actionMessage = saved.message
                             }
                         }
-                        incoming.lastOrNull()?.timestamp?.let { timestamp ->
-                            val eventDate = timestamp.substringBefore('T').substringBefore(' ')
+                        activityEvents.maxByOrNull { it.date + it.timeLabel }?.date?.let { eventDate ->
                             if (runCatching { LocalDate.parse(eventDate) }.isSuccess) selectedDate = eventDate
                         }
                         // Alertas anteriores à primeira consulta entram no histórico sem gerar notificações atrasadas.
                         if (hasLoadedAlertBaseline) {
                             pendingAlertNotifications = (pendingAlertNotifications + incoming).distinctBy(CameraAlert::id)
                         }
-                        lastProcessedAlertId = maxOf(lastProcessedAlertId, incoming.maxOf(CameraAlert::id))
                     }
+                    fetchedAlerts.maxOfOrNull(CameraAlert::id)?.let { lastProcessedAlertId = maxOf(lastProcessedAlertId, it) }
                     hasLoadedAlertBaseline = true
                     alertStatus = "Alertas do YOLO sincronizados"
                 } catch (cancelled: CancellationException) {
@@ -397,7 +415,7 @@ class PetGuardViewModel(
             val detection = visibleOfSpecies.single()
             if (detection.petId.isNotBlank()) return@forEach
 
-            val pet = pets.filter { it.species.equals(speciesName, ignoreCase = true) }.singleOrNull()
+            val pet = pets.filter { it.id !in deletingPetIds && it.species.equals(speciesName, ignoreCase = true) }.singleOrNull()
                 ?: return@forEach
             val petAlreadyAssignedToActiveTrack = detections.any {
                 it.trackId != detection.trackId && it.petId == pet.id
@@ -458,6 +476,7 @@ class PetGuardViewModel(
         cameraPrivacyAccepted = false
         cameraStreamUrl = null
         cameraAlerts = emptyList()
+        realtimeApiEvents = emptyList()
         dismissedHomeAlertIds = emptySet()
         sharedSyncJob?.cancel()
         sharedSyncJob = null
@@ -514,8 +533,13 @@ class PetGuardViewModel(
     val selectedDateMillis: Long
         get() = runCatching { LocalDate.parse(selectedDate).atStartOfDay(ZoneId.systemDefault()).toInstant().toEpochMilli() }
             .getOrDefault(Instant.now().toEpochMilli())
-    fun eventsForSelectedDay(): List<PetEvent> = events.filter { it.date == selectedDate }
-    fun eventsForSelectedPet(): List<PetEvent> = events.filter { it.petId == selectedPetId }
+    fun eventsForSelectedDay(): List<PetEvent> = (events + realtimeApiEvents)
+        .asSequence()
+        .filter { it.date == selectedDate }
+        .distinctBy(PetEvent::id)
+        .sortedWith(compareByDescending<PetEvent> { it.date }.thenByDescending { it.timeLabel })
+        .toList()
+    fun eventsForSelectedPet(): List<PetEvent> = (events + realtimeApiEvents).filter { it.petId == selectedPetId }
 
     fun addCamera(name: String, url: String) {
         val safeName = name.trim().take(40)
@@ -690,6 +714,53 @@ class PetGuardViewModel(
         }
     }
 
+    fun deletePet(pet: PetProfile) {
+        if (pets.none { it.id == pet.id }) return
+        deletingPetIds = deletingPetIds + pet.id
+        viewModelScope.launch {
+            while (assignmentRequestsInFlight.isNotEmpty()) delay(100)
+            val linkedDetections = liveDetections.filter { it.petId == pet.id }
+            val camera = cameras.lastOrNull { it.connected && it.url.isNotBlank() }
+            if (linkedDetections.isNotEmpty() && camera == null) {
+                actionMessage = "Conecte a câmera para remover o vínculo ativo antes de excluir o pet."
+                deletingPetIds = deletingPetIds - pet.id
+                return@launch
+            }
+            try {
+                linkedDetections.forEach { detection ->
+                    PetGuardAlertsApi.assignDetection(camera!!.url, detection, null, forgetPetSignature = true)
+                }
+            } catch (cancelled: CancellationException) {
+                throw cancelled
+            } catch (_: Exception) {
+                actionMessage = "Não foi possível limpar o vínculo da câmera. Tente novamente antes de excluir o pet."
+                deletingPetIds = deletingPetIds - pet.id
+                return@launch
+            }
+
+            when (val result = safely { repository.deletePet(pet.id) }) {
+                is RepositoryResult.Success -> {
+                    deletedPetIds = deletedPetIds + pet.id
+                    pets = pets.filterNot { it.id == pet.id }
+                    events = events.filterNot { it.petId == pet.id }
+                    cameraAlerts = cameraAlerts.filterNot { it.petId == pet.id }
+                    realtimeApiEvents = realtimeApiEvents.filterNot { it.petId == pet.id }
+                    pendingAlertNotifications = pendingAlertNotifications.filterNot { it.petId == pet.id }
+                    liveDetections = liveDetections.map { detection ->
+                        if (detection.petId == pet.id) detection.copy(petId = "", petName = "") else detection
+                    }
+                    if (selectedPetId == pet.id) selectedPetId = pets.firstOrNull()?.id.orEmpty()
+                    deletingPetIds = deletingPetIds - pet.id
+                    actionMessage = "${pet.name.replaceFirstChar { it.uppercase() }} foi excluído."
+                }
+                is RepositoryResult.Failure -> {
+                    deletingPetIds = deletingPetIds - pet.id
+                    actionMessage = result.message
+                }
+            }
+        }
+    }
+
     fun selectPet(id: String) {
         if (pets.none { it.id == id }) return
         selectedPetId = id
@@ -711,7 +782,11 @@ class PetGuardViewModel(
             try {
                 PetGuardAlertsApi.resetDemo(camera.url)
                 val clearedEvents = when (val result = safely { repository.clearApiEvents() }) {
-                    is RepositoryResult.Success -> { events = events.filterNot { it.id.startsWith("api-alert-") }; true }
+                    is RepositoryResult.Success -> {
+                        events = events.filterNot { it.id.startsWith("api-alert-") }
+                        realtimeApiEvents = emptyList()
+                        true
+                    }
                     is RepositoryResult.Failure -> { actionMessage = result.message; false }
                 }
                 if (clearedEvents) actionMessage = "Histórico de testes limpo."

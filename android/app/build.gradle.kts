@@ -14,6 +14,13 @@ val localProperties = Properties().apply {
 }
 
 fun quotedBuildConfig(value: String): String = "\"${value.replace("\\", "\\\\").replace("\"", "\\\"")}\""
+val supabaseUrl = System.getenv("SUPABASE_URL")?.takeIf { it.isNotBlank() }
+    ?: localProperties.getProperty("supabase.url", "")
+val resolvedSupabaseUrl = supabaseUrl.trim()
+val supabaseAnonKey = System.getenv("SUPABASE_ANON_KEY")?.takeIf { it.isNotBlank() }
+    ?: localProperties.getProperty("supabase.anonKey")
+    ?: localProperties.getProperty("supabase.publishableKey", "")
+val resolvedSupabaseAnonKey = supabaseAnonKey.trim()
 
 // Firebase lê as opções do projeto neste arquivo; o plugin é aplicado assim que ele existir.
 if (file("google-services.json").exists()) {
@@ -29,7 +36,8 @@ android {
         targetSdk = 35
         versionCode = 1
         versionName = "1.0"
-        buildConfigField("String", "SUPABASE_PUBLISHABLE_KEY", quotedBuildConfig(localProperties.getProperty("supabase.publishableKey", "")))
+        buildConfigField("String", "SUPABASE_URL", quotedBuildConfig(resolvedSupabaseUrl))
+        buildConfigField("String", "SUPABASE_ANON_KEY", quotedBuildConfig(resolvedSupabaseAnonKey))
     }
     buildFeatures {
         compose = true

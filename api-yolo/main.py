@@ -819,6 +819,7 @@ def associar_deteccao_a_pet(payload: dict = Body(...), user: dict = Depends(requ
         raise HTTPException(status_code=422, detail="Identificador de rastreamento inválido.")
     pet_id = str(payload.get("pet_id", "")).strip()[:80]
     pet_name = " ".join(str(payload.get("pet_name", "")).split())[:60]
+    forget_pet_signature = payload.get("forget_pet_signature") is True
     pet_species = str(payload.get("pet_species", "")).strip().casefold()
     pet_size = str(payload.get("pet_size") or payload.get("porte") or "medio").strip().casefold()
     if pet_size == "médio":
@@ -875,10 +876,19 @@ def associar_deteccao_a_pet(payload: dict = Body(...), user: dict = Depends(requ
                         "pet_weight": pet_weight,
                         "hist": hist,
                     }
+        if forget_pet_signature and old_pet_id and old_pet_id != pet_id:
+            for other_track_id, assignment in list(pet_assignments.items()):
+                if assignment.get("pet_id") == old_pet_id:
+                    pet_assignments.pop(other_track_id, None)
+                    water_interaction_sessions.pop(other_track_id, None)
+                    food_interaction_sessions.pop(other_track_id, None)
+            pet_visual_signatures.pop(old_pet_id, None)
 
     if old_pet_id and old_pet_id != pet_id:
         with pet_assignment_lock:
             old_still_assigned = any(value.get("pet_id") == old_pet_id for value in pet_assignments.values())
+            if forget_pet_signature and not old_still_assigned:
+                pet_visual_signatures.pop(old_pet_id, None)
         if not old_still_assigned:
             pet_presence_states.pop(old_pet_id, None)
 
