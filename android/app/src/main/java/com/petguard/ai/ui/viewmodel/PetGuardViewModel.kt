@@ -32,8 +32,11 @@ import kotlinx.coroutines.delay
 import kotlinx.coroutines.isActive
 import java.time.Instant
 import java.time.LocalDate
+import java.time.LocalDateTime
 import java.time.OffsetDateTime
 import java.time.ZoneId
+import java.time.format.DateTimeFormatter
+import java.util.Locale
 import java.text.Normalizer
 import kotlin.math.pow
 import kotlin.math.roundToInt
@@ -80,6 +83,7 @@ class PetGuardViewModel(
     val focusedPet: PetProfile get() = pet
     var events by mutableStateOf<List<PetEvent>>(emptyList()); private set
     private var realtimeApiEvents by mutableStateOf<List<PetEvent>>(emptyList())
+    private var pendingApiEventPersistence: List<PetEvent> = emptyList()
     var cameras by mutableStateOf<List<CameraDevice>>(emptyList()); private set
     var isLoading by mutableStateOf(false); private set
     var contentError by mutableStateOf<String?>(null); private set
@@ -313,21 +317,24 @@ class PetGuardViewModel(
                             val timePart = localDateTime?.format(java.time.format.DateTimeFormatter.ofPattern("HH:mm"))
                                 ?: alert.timestamp.substringAfter('T').takeIf { it != alert.timestamp }?.take(5)
                                 ?: alert.timestamp.substringAfter(' ').take(5)
+                            val categoryName = alert.category.trim().uppercase(Locale.ROOT)
+                            val petName = alert.petName.ifBlank { "pet" }.replaceFirstChar { it.uppercase(Locale("pt", "BR")) }
                             PetEvent(
                                 id = "api-alert-${alert.id}",
                                 date = datePart,
-                                category = when (alert.category.uppercase()) {
+                                category = when (categoryName) {
                                     "HIDRATACAO" -> EventCategory.HIDRATACAO
                                     "ALIMENTACAO" -> EventCategory.ALIMENTACAO
                                     "PRESENCA" -> EventCategory.PRESENCA
                                     "ATTENTION" -> EventCategory.ATTENTION
                                     else -> EventCategory.ACTIVITY
                                 },
-                                title = when (alert.category.uppercase()) {
-                                    "HIDRATACAO" -> "Hidratação • ${alert.petName.ifBlank { "pet" }.replaceFirstChar { it.uppercase() }}"
-                                    "ALIMENTACAO" -> "Alimentação • ${alert.petName.ifBlank { "pet" }.replaceFirstChar { it.uppercase() }}"
-                                    "PRESENCA" -> "Presença • ${alert.petName.ifBlank { "pet" }.replaceFirstChar { it.uppercase() }}"
-                                    else -> alert.petName.takeIf { it.isNotBlank() }?.replaceFirstChar { it.uppercase() }?.let { "Alerta · $it" } ?: "Alerta da câmera"
+                                title = when (categoryName) {
+                                    "HIDRATACAO" -> "Hidratação • $petName"
+                                    "ALIMENTACAO" -> "Alimentação • $petName"
+                                    "PRESENCA" -> "Presença • $petName"
+                                    "ATTENTION" -> "Atenção • $petName"
+                                    else -> "Alerta · $petName"
                                 },
                                 detail = alert.message,
                                 timeLabel = timePart.ifBlank { "agora" },
@@ -336,21 +343,20 @@ class PetGuardViewModel(
                         }
                         realtimeApiEvents = (activityEvents + realtimeApiEvents)
                             .distinctBy(PetEvent::id)
-                            .sortedWith(compareBy<PetEvent> { it.date }.thenBy { it.timeLabel })
-                            .takeLast(300)
+                            .sortedWith(compareByDescending<PetEvent> { it.date }.thenByDescending { it.timeLabel })
+                            .take(300)
                         events = (activityEvents + events).distinctBy(PetEvent::id).take(300)
-                        activityEvents.forEach { event ->
-                            when (val saved = safely { repository.addEvent(event) }) {
-                                is RepositoryResult.Success -> Unit
-                                is RepositoryResult.Failure -> actionMessage = saved.message
-                            }
-                        }
-                        activityEvents.maxByOrNull { it.date + it.timeLabel }?.date?.let { eventDate ->
-                            if (runCatching { LocalDate.parse(eventDate) }.isSuccess) selectedDate = eventDate
-                        }
+                        pendingApiEventPersistence = (activityEvents + pendingApiEventPersistence)
+                            .distinctBy(PetEvent::id)
                         // Alertas anteriores à primeira consulta entram no histórico sem gerar notificações atrasadas.
                         if (hasLoadedAlertBaseline) {
                             pendingAlertNotifications = (pendingAlertNotifications + incoming).distinctBy(CameraAlert::id)
+                        }
+                    }
+                    pendingApiEventPersistence.toList().forEach { event ->
+                        when (safely { repository.addEvent(event) }) {
+                            is RepositoryResult.Success -> pendingApiEventPersistence = pendingApiEventPersistence.filterNot { it.id == event.id }
+                            is RepositoryResult.Failure -> Unit
                         }
                     }
                     fetchedAlerts.maxOfOrNull(CameraAlert::id)?.let { lastProcessedAlertId = maxOf(lastProcessedAlertId, it) }
@@ -513,6 +519,7 @@ class PetGuardViewModel(
         cameraStreamUrl = null
         cameraAlerts = emptyList()
         realtimeApiEvents = emptyList()
+        pendingApiEventPersistence = emptyList()
         dismissedHomeAlertIds = emptySet()
         sharedSyncJob?.cancel()
         sharedSyncJob = null
@@ -845,7 +852,7 @@ class PetGuardViewModel(
 
     private fun isPositiveRoutineEvent(message: String): Boolean {
         val normalized = normalizedMessage(message)
-        return "registrou" in normalized && "nao registrou" !in normalized
+        return ("registrou" in normalized || "esteve presente na zona" in normalized) && "nao registrou" !in normalized
     }
 
     private fun isMissedRoutineEvent(message: String): Boolean =
@@ -946,6 +953,25 @@ class PetGuardViewModel(
     }
     fun latestHomeAlert(): HomeAlert? {
         if (selectedPetId.isBlank()) return null
+        fun eventSortKey(event: PetEvent) = "${event.date}T${event.timeLabel}"
+        fun eventHomeAlert(event: PetEvent, positive: Boolean): HomeAlert {
+            val categoryLabel = if (event.category == EventCategory.ALIMENTACAO) "ALIMENTAÇÃO" else "HIDRATAÇÃO"
+            return HomeAlert(event.id, categoryLabel, "${event.title}\n${event.detail}", event.timeLabel, eventSortKey(event), positive)
+        }
+        fun cameraHomeAlert(alert: CameraAlert, positive: Boolean): HomeAlert {
+            val category = alert.category.trim().uppercase(Locale.ROOT)
+            val label = if (category == "ALIMENTACAO") "ALIMENTAÇÃO" else "HIDRATAÇÃO"
+            val time = alert.timestamp.substringAfter('T').takeIf { it != alert.timestamp }?.take(5)
+                ?: alert.timestamp.substringAfter(' ').take(5)
+            return HomeAlert("api-alert-${alert.id}", label, alert.message, time.ifBlank { "agora" }, alert.timestamp, positive)
+        }
+        fun alertInstant(alert: HomeAlert): Instant? {
+            runCatching { OffsetDateTime.parse(alert.sortKey).toInstant() }.getOrNull()?.let { return it }
+            return runCatching {
+                LocalDateTime.parse(alert.sortKey, DateTimeFormatter.ofPattern("yyyy-MM-dd'T'HH:mm"))
+                    .atZone(ZoneId.systemDefault()).toInstant()
+            }.getOrNull()
+        }
         val fromEvents = events.asSequence()
             .filter { event ->
                 event.petId == selectedPetId && when (event.category) {
@@ -981,6 +1007,25 @@ class PetGuardViewModel(
                 HomeAlert("api-alert-${alert.id}", label, alert.message, time.ifBlank { "agora" }, timestamp)
             }
         val candidateAlerts = fromEvents + fromCamera
+        val positiveAlerts = (
+            events.asSequence()
+                .filter { it.petId == selectedPetId && it.category in setOf(EventCategory.HIDRATACAO, EventCategory.ALIMENTACAO) && isPositiveRoutineEvent(it.detail) }
+                .map { eventHomeAlert(it, true) } +
+            cameraAlerts.asSequence()
+                .filter { it.petId == selectedPetId && it.category.trim().uppercase(Locale.ROOT) in setOf("HIDRATACAO", "ALIMENTACAO") && isPositiveRoutineEvent(it.message) }
+                .map { cameraHomeAlert(it, true) }
+            ).distinctBy { it.id }
+        val newestPositive = positiveAlerts
+            .filterNot { it.id in dismissedHomeAlertIds }
+            .filter { alert -> alertInstant(alert)?.let { !it.isAfter(Instant.now().plusSeconds(15)) && !it.isBefore(Instant.now().minusSeconds(120)) } == true }
+            .maxByOrNull { alertInstant(it) ?: Instant.MIN }
+        val newestNegativeRoutine = candidateAlerts
+            .filter { it.title == "HIDRATAÇÃO" || it.title == "ALIMENTAÇÃO" }
+            .maxByOrNull { alertInstant(it) ?: Instant.MIN }
+        if (newestPositive != null && (newestNegativeRoutine == null ||
+                (alertInstant(newestNegativeRoutine) ?: Instant.MIN) <= (alertInstant(newestPositive) ?: Instant.MIN))) {
+            return newestPositive
+        }
         val latestReturnKey = (events.asSequence()
             .filter { it.petId == selectedPetId && it.category == EventCategory.PRESENCA && isPresenceReturn(it.detail) }
             .map { "${it.date}T${it.timeLabel}" } + cameraAlerts.asSequence()
@@ -989,7 +1034,7 @@ class PetGuardViewModel(
         return candidateAlerts
             .filterNot { it.id in dismissedHomeAlertIds }
             .filterNot { it.detail.let(::isPresenceAbsence) && latestReturnKey != null && latestReturnKey >= it.sortKey }
-            .maxByOrNull { it.sortKey }
+            .maxByOrNull { alertInstant(it) ?: Instant.MIN }
     }
 
     fun dismissHomeAlert(id: String) { dismissedHomeAlertIds = dismissedHomeAlertIds + id }

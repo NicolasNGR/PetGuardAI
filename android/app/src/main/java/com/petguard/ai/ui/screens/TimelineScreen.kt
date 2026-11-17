@@ -29,6 +29,7 @@ import java.util.Locale
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun TimelineScreen(vm: PetGuardViewModel) {
+    LaunchedEffect(Unit) { vm.selectDate(LocalDate.now().toString()) }
     val signals = petSignalColors()
     val selected = remember(vm.selectedDate) { LocalDate.parse(vm.selectedDate) }
     val dayEvents = vm.eventsForSelectedDay()

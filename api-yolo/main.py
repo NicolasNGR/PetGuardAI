@@ -96,6 +96,7 @@ pet_visual_signatures = {}    # {pet_id: {"pet_name": ..., "pet_species": ..., "
 
 water_interaction_sessions = {}
 food_interaction_sessions = {}
+interaction_alert_cooldowns = {}
 PET_MONITOR_CHECK_AT = {}
 pet_presence_states = {}
 
@@ -448,6 +449,7 @@ def record_water_interaction(pet_id, pet_name, now, pet_size="medio", pet_weight
             "UPDATE estado_hidratacao SET pet_nome = ?, pet_porte = ?, pet_peso = ?, ultima_interacao_agua = ?, ultimo_aviso = NULL WHERE pet_id = ?",
             (pet_name, pet_size, pet_weight, now.isoformat(timespec="seconds"), pet_id),
         )
+    _create_interaction_alert(pet_id, pet_name, "HIDRATACAO", "água")
 
 
 def ensure_feeding_monitoring(pet_id, pet_name, now, pet_size="medio", pet_weight=None):
@@ -469,6 +471,17 @@ def record_food_interaction(pet_id, pet_name, now, pet_size="medio", pet_weight=
             "UPDATE estado_alimentacao SET pet_nome = ?, pet_porte = ?, pet_peso = ?, ultima_interacao_comida = ?, ultimo_aviso = NULL WHERE pet_id = ?",
             (pet_name, pet_size, pet_weight, now.isoformat(timespec="seconds"), pet_id),
         )
+    _create_interaction_alert(pet_id, pet_name, "ALIMENTACAO", "ração")
+
+
+def _create_interaction_alert(pet_id, pet_name, category, zone_label):
+    cooldown_key = (pet_name.strip().casefold(), zone_label.casefold())
+    now_monotonic = time.monotonic()
+    last_alert = interaction_alert_cooldowns.get(cooldown_key)
+    if last_alert is not None and now_monotonic - last_alert < 30:
+        return
+    interaction_alert_cooldowns[cooldown_key] = now_monotonic
+    create_pet_alert(category, f"{pet_name} esteve presente na zona de {zone_label}.", pet_id, pet_name)
 
 
 def _format_duration(seconds):
@@ -692,14 +705,7 @@ def update_live_pet_detections(result, frame_shape, raw_frame: np.ndarray | None
                 duration = (now - session["started_at"]).total_seconds()
                 if duration >= 2 and not session["recorded"]:
                     recorder = record_water_interaction if interaction == "HIDRATACAO" else record_food_interaction
-                    category_label = "zona de água" if interaction == "HIDRATACAO" else "zona de ração"
                     recorder(detection["pet_id"], detection["pet_name"], now, session["pet_size"], session.get("pet_weight"))
-                    create_pet_alert(
-                        interaction,
-                        f"A câmera registrou {detection['pet_name']} na {category_label}. Isso confirma presença na área, não ingestão.",
-                        detection["pet_id"],
-                        detection["pet_name"],
-                    )
                     session["recorded"] = True
 
     active_tracks = {item["track_id"] for item in detections}
@@ -720,13 +726,6 @@ def update_live_pet_detections(result, frame_shape, raw_frame: np.ndarray | None
             duration = (session["last_seen"] - session["started_at"]).total_seconds()
             if duration >= 2 and not session["recorded"]:
                 recorder(session["pet_id"], session["pet_name"], now, session.get("pet_size", "medio"), session.get("pet_weight"))
-                category_label = "zona de água" if interaction_name == "HIDRATACAO" else "zona de ração"
-                create_pet_alert(
-                    interaction_name,
-                    f"A câmera registrou {session['pet_name']} na {category_label}. Isso confirma presença na área, não ingestão.",
-                    session["pet_id"],
-                    session["pet_name"],
-                )
             del sessions[track_id]
 
     with camera_state_lock:
@@ -1088,6 +1087,7 @@ def reset_demo_data(user: dict = Depends(require_camera_owner)):
     pet_presence_states.clear()
     water_interaction_sessions.clear()
     food_interaction_sessions.clear()
+    interaction_alert_cooldowns.clear()
     PET_MONITOR_CHECK_AT.clear()
     return {"status": "ok", "message": "Dados de teste limpos com sucesso."}
 

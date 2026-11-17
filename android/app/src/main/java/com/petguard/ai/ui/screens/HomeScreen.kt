@@ -101,8 +101,8 @@ fun HomeScreen(vm: PetGuardViewModel, onConnectCamera: () -> Unit = { vm.navigat
                 }
                 vm.latestHomeAlert() != null -> {
                     val alert = vm.latestHomeAlert()!!
-                    val alertColor = if (alert.title == "HIDRATAÇÃO") signals.info else signals.attention
-                    PetAlertCard(alert.title, "Alerta da rotina", alert.detail, alert.timeLabel, alertColor,
+                    val alertColor = if (alert.isPositive) signals.healthy else if (alert.title == "HIDRATAÇÃO") signals.info else signals.attention
+                    PetAlertCard(alert.title, if (alert.isPositive) "Visita registrada" else "Alerta da rotina", alert.detail, alert.timeLabel, alertColor,
                         actionLabel = "Ciente", onAction = { vm.dismissHomeAlert(alert.id) })
                 }
                 else -> Card(Modifier.fillMaxWidth(), colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface)) {

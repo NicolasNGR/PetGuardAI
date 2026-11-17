@@ -64,7 +64,8 @@ data class HomeAlert(
     val title: String,
     val detail: String,
     val timeLabel: String,
-    val sortKey: String
+    val sortKey: String,
+    val isPositive: Boolean = false
 )
 
 data class CameraZone(val x1: Float, val y1: Float, val x2: Float, val y2: Float)
