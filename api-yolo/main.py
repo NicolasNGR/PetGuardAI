@@ -100,13 +100,16 @@ interaction_alert_cooldowns = {}
 PET_MONITOR_CHECK_AT = {}
 pet_presence_states = {}
 
-HYDRATION_ALERT_AFTER_SECONDS = max(10, int(os.getenv("PETGUARD_HYDRATION_ALERT_SECONDS", "28800")))
-FEEDING_ALERT_AFTER_SECONDS = max(10, int(os.getenv("PETGUARD_FEEDING_ALERT_SECONDS", "43200")))
+_hydration_alert_env = os.getenv("PETGUARD_HYDRATION_ALERT_SECONDS")
+_feeding_alert_env = os.getenv("PETGUARD_FEEDING_ALERT_SECONDS")
+HYDRATION_ALERT_AFTER_SECONDS = max(10, int(_hydration_alert_env or "15"))
+FEEDING_ALERT_AFTER_SECONDS = max(10, int(_feeding_alert_env or "15"))
 _demo_routine_seconds = os.getenv("PETGUARD_DEMO_ROUTINE_SECONDS", "").strip()
 try:
     DEMO_ROUTINE_SECONDS = max(1, int(_demo_routine_seconds)) if _demo_routine_seconds else None
 except ValueError:
     DEMO_ROUTINE_SECONDS = None
+DEFAULT_ROUTINE_THRESHOLDS = not _hydration_alert_env and not _feeding_alert_env and DEMO_ROUTINE_SECONDS is None
 PRESENCE_LOST_AFTER_SECONDS = max(5, int(os.getenv("PETGUARD_PRESENCE_LOST_SECONDS", "120")))
 REID_SIMILARITY_THRESHOLD = float(os.getenv("PETGUARD_REID_THRESHOLD", "0.68"))
 
@@ -423,6 +426,8 @@ def get_pet_alert_thresholds(pet_size: str, pet_weight: float | None):
     elif size == "grande":
         factor = 1.25
     else:
+        factor = 1.0
+    if DEFAULT_ROUTINE_THRESHOLDS:
         factor = 1.0
     return (
         max(1, int(HYDRATION_ALERT_AFTER_SECONDS * factor)),
