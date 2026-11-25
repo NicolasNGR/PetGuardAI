@@ -1,5 +1,0 @@
-[35mandroid/README.md[m[36m:[mO perfil do tutor, pets, câmera salva, preferências e eventos do YOLO são sincronizados nessa tabela. O vídeo continua vindo diretamente do [1;31mnotebook[m/câmera: ambos os celulares precisam alcançar o endereço de transmissão pela rede configurada.
-[35mandroid/app/src/main/java/com/petguard/ai/data/PetGuardRepository.kt[m[36m:[m    // Endereço local da webcam usada no teste da apresentação. O [1;31mnotebook[m deve
-[35mandroid/app/src/main/java/com/petguard/ai/ui/viewmodel/PetGuardViewModel.kt[m[36m:[m            var stoppedOn[1;31mNotebook[m = true
-[35mandroid/app/src/main/java/com/petguard/ai/ui/viewmodel/PetGuardViewModel.kt[m[36m:[m                stoppedOn[1;31mNotebook[m = try {
-[35mandroid/app/src/main/java/com/petguard/ai/ui/viewmodel/PetGuardViewModel.kt[m[36m:[m                    actionMessage = if (stoppedOn[1;31mNotebook[m) {
